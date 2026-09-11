@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 - 2026-09-11
+
+- Consolidate the current iterative Studio orchestration, live-preview, validation and recovery work for the stack release.
+- Keep local desktop integration and lockfile state untouched by the version-only release bump.
+
+
 ## 0.4.0 - 2026-09-11
 
 ### Natural-language Studio workflow
