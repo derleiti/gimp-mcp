@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=GIMP MCP Studio
+Comment=Start GIMP MCP Control Center
+Exec=/home/zombie/gimp-mcp/scripts/gimp-mcp-control
+Path=/home/zombie/gimp-mcp
+Terminal=false
+Categories=Graphics;Development;
+StartupNotify=true
