@@ -70,6 +70,9 @@ class LiveBridge:
     def undo(self, path: Path) -> dict[str, Any]:
         return self.request("undo", path=str(path))
 
+    def vision_snapshot(self, output: Path) -> dict[str, Any]:
+        return self.request("vision_snapshot", output=str(output))
+
     def mirror_if_available(self, path: Path) -> dict[str, Any] | None:
         if not self.available():
             return None

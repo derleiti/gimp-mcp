@@ -141,6 +141,48 @@ class GimpMcpLive(Gimp.PlugIn):
                     'layers': [x.get_name() for x in image.get_layers()],
                 },
             }
+        if command == 'vision_snapshot':
+            image = self._image
+            if image is not None and not image.is_valid():
+                self._image = None
+                image = None
+            if image is None:
+                raise RuntimeError('no live image is open')
+            output = Path(str(payload.get('output') or '')).expanduser().resolve()
+            if output.suffix.lower() != '.png':
+                raise RuntimeError('vision snapshot output must be .png')
+            output.parent.mkdir(parents=True, exist_ok=True)
+            duplicate = image.duplicate()
+            if duplicate is None:
+                raise RuntimeError('could not duplicate live image')
+            try:
+                Gimp.file_save(Gimp.RunMode.NONINTERACTIVE, duplicate, Gio.File.new_for_path(str(output)), None)
+            finally:
+                if duplicate.is_valid():
+                    duplicate.delete()
+            info_layers = []
+            for layer in image.get_layers():
+                ook, ox, oy = layer.get_offsets()
+                Gimp.Selection.none(image)
+                image.select_item(Gimp.ChannelOps.REPLACE, layer)
+                bok, non_empty, x1, y1, x2, y2 = Gimp.Selection.bounds(image)
+                info_layers.append({
+                    'layer_id': int(layer.get_tattoo()), 'name': layer.get_name(),
+                    'x': int(ox) if ook else 0, 'y': int(oy) if ook else 0,
+                    'width': layer.get_width(), 'height': layer.get_height(),
+                    'content_x': int(x1) if bok and non_empty else None,
+                    'content_y': int(y1) if bok and non_empty else None,
+                    'content_width': int(x2-x1) if bok and non_empty else 0,
+                    'content_height': int(y2-y1) if bok and non_empty else 0,
+                    'visible': layer.get_visible(), 'opacity': layer.get_opacity(),
+                })
+            Gimp.Selection.none(image)
+            return {
+                'ok': True, 'command': command, 'output': str(output),
+                'width': image.get_width(), 'height': image.get_height(),
+                'layers': len(info_layers), 'source': 'live-gimp',
+                'document_info': {'width': image.get_width(), 'height': image.get_height(), 'layer_count': len(info_layers), 'layers': info_layers},
+            }
         if command in {'layer_update', 'translate', 'undo'}:
             image = self._image
             if image is not None and not image.is_valid():

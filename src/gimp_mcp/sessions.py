@@ -167,6 +167,8 @@ class SessionManager:
             "undo_depth": len(s.undo_stack),
             "redo_depth": len(s.redo_stack),
             "preview": str(s.workdir / "preview.png") if (s.workdir / "preview.png").exists() else None,
+            "vision_overlay": str(s.workdir / "vision-overlay.png") if (s.workdir / "vision-overlay.png").exists() else None,
+            "vision_timeline": str(s.workdir / "vision-timeline.gif") if (s.workdir / "vision-timeline.gif").exists() else None,
         } for s in sessions]
 
     def close(self, session_id: str, *, discard: bool = False) -> None:

@@ -79,7 +79,7 @@ class GimpOperations:
         return result
 
     def document_info(self, s: ArtworkSession) -> dict[str, Any]:
-        return self.bridge.run_json(_load(s.document) + "layers=img.get_layers()\nresult={'width':img.get_width(),'height':img.get_height(),'layer_count':len(layers),'layers':[{'layer_id':int(x.get_tattoo()),'name':x.get_name(),'width':x.get_width(),'height':x.get_height(),'visible':x.get_visible(),'opacity':x.get_opacity()} for x in layers]}\nimg.delete()\n")
+        return self.bridge.run_json(_load(s.document) + "layers=img.get_layers()\nitems=[]\nfor x in layers:\n ok,ox,oy=x.get_offsets()\n Gimp.Selection.none(img)\n selected=img.select_item(Gimp.ChannelOps.REPLACE,x)\n bok,non_empty,x1,y1,x2,y2=Gimp.Selection.bounds(img)\n items.append({'layer_id':int(x.get_tattoo()),'name':x.get_name(),'x':int(ox) if ok else 0,'y':int(oy) if ok else 0,'width':x.get_width(),'height':x.get_height(),'content_x':int(x1) if bok and non_empty else None,'content_y':int(y1) if bok and non_empty else None,'content_width':int(x2-x1) if bok and non_empty else 0,'content_height':int(y2-y1) if bok and non_empty else 0,'visible':x.get_visible(),'opacity':x.get_opacity()})\nGimp.Selection.none(img)\nresult={'width':img.get_width(),'height':img.get_height(),'layer_count':len(layers),'layers':items}\nimg.delete()\n")
 
     def shape_create(self, s: ArtworkSession, name: str, shape: str, x: float, y: float, width: float, height: float, color: str) -> dict[str, Any]:
         shape = str(shape).strip().lower()

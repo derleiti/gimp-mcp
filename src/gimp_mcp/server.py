@@ -20,6 +20,7 @@ from .live_bridge import LiveBridge
 from .jobs import JobManager
 from .prompt_runner import PromptRunner
 from .studio_mcp_client import StudioMcpClient
+from .vision import VisionRenderer
 
 settings = Settings()
 policy = PathPolicy(settings.allowed_roots)
@@ -31,6 +32,11 @@ live_bridge = LiveBridge()
 events = EventBus(settings.state_dir / "events.jsonl")
 providers = ProviderManager()
 jobs = JobManager(settings.state_dir / "jobs")
+vision = VisionRenderer(
+    default_grid=int(os.getenv("GIMP_MCP_VISION_GRID", "64")),
+    max_frames=int(os.getenv("GIMP_MCP_VISION_FRAMES", "10")),
+    frame_delay_ms=int(os.getenv("GIMP_MCP_VISION_DELAY_MS", "450")),
+)
 
 class _StaticTokenVerifier:
     def __init__(self, expected: str) -> None:
@@ -56,7 +62,7 @@ def _build_mcp() -> MCPServer:
         )
     return MCPServer(
         "GIMP MCP", version="0.4.0",
-        instructions="Structured GIMP 3 artwork editing. Prefer the connected live GIMP workspace; batch sessions are a fallback for tests and recovery.",
+        instructions="Structured GIMP 3 artwork editing. Prefer the connected live GIMP workspace; batch sessions are a fallback for tests and recovery. For visual reasoning call vision_capture periodically, then read gimp-vision://SESSION and optionally gimp-timeline://SESSION plus gimp-vision-meta://SESSION. Coordinates are GIMP canvas pixels with origin top-left, +x right, +y down.",
         **kwargs,
     )
 
@@ -270,18 +276,45 @@ def export_artwork(session_id: str, output_path: str, format: Literal['xcf','png
         return _ok(exports.export(s,dst,format,overwrite=overwrite))
     except GimpMcpError as exc:
         return exc.as_dict()
+def _capture_vision_artifacts(s, *, grid_px: int = 64, show_layer_bounds: bool = True, show_labels: bool = True, show_centers: bool = True, update_timeline: bool = True) -> dict[str, Any]:
+    preview=s.workdir/'preview.png'; live_path=s.workdir/'vision-live.png'; source='session-xcf'; live_info=None
+    live=live_bridge.status()
+    if live.get('ok'):
+        try:
+            snap=live_bridge.vision_snapshot(live_path)
+            if snap.get('ok') and live_path.exists():
+                preview=live_path; source='live-gimp'; live_info=snap.get('document_info') if isinstance(snap.get('document_info'),dict) else None
+        except Exception:
+            pass
+    if not preview.exists(): raise FileNotFoundError('Run preview_render first')
+    info=live_info or ops.document_info(s); overlay=s.workdir/'vision-overlay.png'
+    data=vision.render_overlay(preview,overlay,info,grid_px=max(16,min(int(grid_px),1024)),show_layer_bounds=bool(show_layer_bounds),show_labels=bool(show_labels),show_centers=bool(show_centers))
+    data['source']=source; data['overlay_resource_uri']=f'gimp-vision://{s.session_id}'; data['metadata_resource_uri']=f'gimp-vision-meta://{s.session_id}'
+    frames=[]
+    if update_timeline:
+        frames=vision.append_timeline_frame(s.workdir,overlay); data['timeline']=vision.render_timeline(s.workdir,frames); data['timeline_resource_uri']=f'gimp-timeline://{s.session_id}'
+    data['metadata_path']=str(vision.write_metadata(s.workdir,data))
+    events.emit('vision.ready',session_id=s.session_id,operation='vision_capture',status='ok',details={'source':source,'grid_px':data.get('grid_px'),'frames':len(frames)})
+    return data
+
 @mcp.tool()
 def preview_render(session_id: str, max_width: int = 1200, max_height: int = 1200) -> dict[str, Any]:
-    '''Render a bounded PNG preview of the current artwork for vision review. Returns a gimp-preview resource URI.'''
+    """Render a bounded PNG preview. A successful preview also refreshes the coordinate-overlay and rolling GIF vision resources without modifying the artwork."""
     try:
         s=sessions.get(session_id); max_width=max(1,min(max_width,settings.preview_max)); max_height=max(1,min(max_height,settings.preview_max)); out=s.workdir/'preview.png'; tmp=s.workdir/'preview.tmp.png'
         started=time.monotonic(); events.emit('preview.started', session_id=session_id, operation='preview_render', status='running')
         try:
-            data=ops.export(s,tmp,max_width,max_height)
-            tmp.replace(out)
+            data=ops.export(s,tmp,max_width,max_height); tmp.replace(out)
         finally:
             tmp.unlink(missing_ok=True)
-        data['output']=str(out); data['resource_uri']=f'gimp-preview://{session_id}'; events.emit('preview.ready', session_id=session_id, operation='preview_render', status='ok', duration_ms=round((time.monotonic()-started)*1000,2), details={'path':str(out),'width':data.get('width'),'height':data.get('height')}); return _ok(data)
+        data['output']=str(out); data['resource_uri']=f'gimp-preview://{session_id}'
+        try:
+            vision_data=_capture_vision_artifacts(s)
+            data['vision_resource_uri']=vision_data.get('overlay_resource_uri'); data['timeline_resource_uri']=vision_data.get('timeline_resource_uri'); data['vision_source']=vision_data.get('source')
+        except Exception as vision_exc:
+            events.emit('vision.failed',session_id=session_id,operation='vision_capture',status='error',details={'message':str(vision_exc)})
+            data['vision_warning']=str(vision_exc)
+        events.emit('preview.ready', session_id=session_id, operation='preview_render', status='ok', duration_ms=round((time.monotonic()-started)*1000,2), details={'path':str(out),'width':data.get('width'),'height':data.get('height')}); return _ok(data)
     except GimpMcpError as exc: return exc.as_dict()
 
 @mcp.resource('gimp-preview://{session_id}', mime_type='image/png', name='Artwork preview')
@@ -289,6 +322,40 @@ def preview_resource(session_id: str) -> bytes:
     '''Binary PNG preview generated by preview_render.'''
     s=sessions.get(session_id); path=s.workdir/'preview.png'
     if not path.exists(): raise FileNotFoundError('Run preview_render first')
+    return path.read_bytes()
+
+
+@mcp.tool()
+def vision_capture(session_id: str, grid_px: int = 64, show_layer_bounds: bool = True, show_labels: bool = True, show_centers: bool = True, update_timeline: bool = True) -> dict[str, Any]:
+    """Force a fresh AI vision frame using GIMP canvas pixels. Prefer the visible live GIMP image; fall back to the current session preview. Re-read returned MCP resources whenever the AI wants to visually review progress."""
+    try:
+        s=sessions.get(session_id)
+        if not (s.workdir/'preview.png').exists():
+            rendered=preview_render(session_id,settings.preview_max,settings.preview_max)
+            if not rendered.get('ok'): return rendered
+        return _ok(_capture_vision_artifacts(s,grid_px=grid_px,show_layer_bounds=show_layer_bounds,show_labels=show_labels,show_centers=show_centers,update_timeline=update_timeline))
+    except GimpMcpError as exc: return exc.as_dict()
+    except Exception as exc: return {'ok':False,'error':{'code':'VISION_CAPTURE_FAILED','message':str(exc),'recoverable':True}}
+
+@mcp.resource('gimp-vision://{session_id}', mime_type='image/png', name='GIMP coordinate vision overlay')
+def vision_resource(session_id: str) -> bytes:
+    '''Latest AI vision overlay. Coordinates are canvas pixels: origin top-left, +x right, +y down.'''
+    s=sessions.get(session_id); path=s.workdir/'vision-overlay.png'
+    if not path.exists(): raise FileNotFoundError('Run vision_capture first')
+    return path.read_bytes()
+
+@mcp.resource('gimp-timeline://{session_id}', mime_type='image/gif', name='Rolling GIMP vision timeline')
+def vision_timeline_resource(session_id: str) -> bytes:
+    '''Animated GIF containing the most recent AI vision frames. Re-read this resource to obtain the latest rolling timeline.'''
+    s=sessions.get(session_id); path=s.workdir/'vision-timeline.gif'
+    if not path.exists(): raise FileNotFoundError('Run vision_capture with update_timeline=true first')
+    return path.read_bytes()
+
+@mcp.resource('gimp-vision-meta://{session_id}', mime_type='application/json', name='GIMP vision geometry metadata')
+def vision_metadata_resource(session_id: str) -> bytes:
+    '''Structured canvas/layer geometry matching the latest vision overlay.'''
+    s=sessions.get(session_id); path=s.workdir/'vision.json'
+    if not path.exists(): raise FileNotFoundError('Run vision_capture first')
     return path.read_bytes()
 
 @mcp.tool()
@@ -318,6 +385,7 @@ def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         "transform_layer": transform_layer,
         "filter_apply": filter_apply,
         "preview_render": preview_render,
+        "vision_capture": vision_capture,
     }
     fn = allowed.get(name)
     if fn is None:

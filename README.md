@@ -162,3 +162,14 @@ The Control Center Live view refreshes `preview.png` from the selected artwork s
 ### Autonomous diagnostics
 
 Run `./scripts/auto-debug` for a repeatable health pass. It records results in `~/.local/state/gimp-mcp/auto-debug.log` and checks the test suite, native provider status, latest preview integrity, a real PNG export, the live bridge state, and the Streamable HTTP MCP handshake. GUI runtime exceptions are written to `~/.local/state/gimp-mcp/gui.log`.
+
+
+## Vision-assisted MCP
+
+GIMP MCP can expose a lightweight visual feedback loop for MCP-capable AI clients. Call `vision_capture(session_id)` after meaningful edits, then read the returned resources:
+
+- `gimp-vision://<session_id>` - current PNG with a non-destructive GIMP canvas-coordinate overlay.
+- `gimp-timeline://<session_id>` - rolling animated GIF of the most recent vision frames; re-read the same URI to obtain the newest timeline.
+- `gimp-vision-meta://<session_id>` - structured canvas and layer geometry matching the overlay.
+
+The coordinate contract follows GIMP/XCF canvas coordinates: `(0,0)` is the top-left of the image canvas, X increases right, Y increases down, and layer offsets may be outside the canvas. The overlay is never written into the artwork. When the persistent live plug-in supports `vision_snapshot`, the capture comes from the visible GIMP image; otherwise the current session XCF is rendered as a safe fallback. ImageMagick (`magick` or `convert`) is required for overlay/GIF rendering.
