@@ -118,14 +118,13 @@ def test_tool_failure_does_not_replay_successful_steps(tmp_path: Path):
     assert tool_names.count("layer_create") == 1
 
 
-def test_parse_plan_accepts_shape_create_and_rejects_fake_filter_alias():
+def test_parse_plan_accepts_shape_create_and_normalizes_filter_aliases():
     shape = json.dumps({"goal":"bear","steps":[{"tool":"shape_create","arguments":{"name":"Head","shape":"ellipse","x":10,"y":10,"width":100,"height":80,"color":"#654321"},"reason":"head"}]})
     parsed = parse_plan(shape)
     assert parsed["steps"][0]["tool"] == "shape_create"
-    bad = json.dumps({"goal":"x","steps":[{"tool":"filter_apply","arguments":{"layer_id":"$last_layer_id","operation":"gaussian_blur","parameters":{}},"reason":"bad alias"}]})
-    try:
+    alias = json.dumps({"goal":"x","steps":[{"tool":"filter_apply","arguments":{"layer_id":"$last_layer_id","operation":"gaussian_blur","parameters":{"radius":3}},"reason":"blur"}]})
+    parsed = parse_plan(alias)
+    assert parsed["steps"][0]["arguments"]["operation"] == "gegl:gaussian-blur"
+    bad = json.dumps({"goal":"x","steps":[{"tool":"filter_apply","arguments":{"layer_id":"$last_layer_id","operation":"totally_fake_filter","parameters":{}},"reason":"bad"}]})
+    with pytest.raises(PlanError):
         parse_plan(bad)
-    except PlanError as exc:
-        assert "unsupported filter operation" in str(exc)
-    else:
-        raise AssertionError("invalid filter alias was accepted")

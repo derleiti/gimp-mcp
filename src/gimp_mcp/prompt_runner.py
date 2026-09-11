@@ -30,6 +30,8 @@ Tool argument guide:
 - text_create: text, x, y, optional size, font_name.
 - transform_layer: layer_id, action, values; prefer translate values=[dx,dy], rotate=[degrees], scale=[x0,y0,x1,y1]. Semantic objects are also accepted.
 - filter_apply: layer_id, operation, parameters, optional name.
+  Gaussian blur accepts std-dev-x/std-dev-y; a single radius/size/sigma is also normalized safely by the host.
+  Unsharp mask uses std-dev, scale, threshold. Brightness/contrast uses brightness (-3..3, subtle usually ±0.02..0.15) and contrast (default 1.0, subtle usually 0.9..1.15). Percentage aliases brightness_percent/contrast_percent are accepted by the host.
 Do not add undocumented arguments.
 This is a NATURAL LANGUAGE art workflow: the user describes the desired image/edit; you translate it into the safest executable plan.
 Prefer a small number of deterministic steps over speculative effects.
@@ -64,6 +66,33 @@ _SAFE_FILTERS = {
     "gegl:shadows-highlights",
 }
 
+_FILTER_ALIASES = {
+    "blur": "gegl:gaussian-blur",
+    "gaussian-blur": "gegl:gaussian-blur",
+    "gaussian_blur": "gegl:gaussian-blur",
+    "gegl:gaussian_blur": "gegl:gaussian-blur",
+    "brightness-contrast": "gegl:brightness-contrast",
+    "brightness_contrast": "gegl:brightness-contrast",
+    "gegl:brightness_contrast": "gegl:brightness-contrast",
+    "unsharp-mask": "gegl:unsharp-mask",
+    "unsharp_mask": "gegl:unsharp-mask",
+    "sharpen": "gegl:unsharp-mask",
+    "gegl:unsharp_mask": "gegl:unsharp-mask",
+    "color-temperature": "gegl:color-temperature",
+    "color_temperature": "gegl:color-temperature",
+    "gegl:color_temperature": "gegl:color-temperature",
+    "shadows-highlights": "gegl:shadows-highlights",
+    "shadows_highlights": "gegl:shadows-highlights",
+    "gegl:shadows_highlights": "gegl:shadows-highlights",
+}
+
+def _canonical_filter_operation(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    canonical = _FILTER_ALIASES.get(raw, raw.replace("_", "-"))
+    if canonical and not canonical.startswith("gegl:"):
+        canonical = "gegl:" + canonical
+    return canonical
+
 
 def _validate_step_arguments(index: int, tool: str, arguments: dict[str, Any]) -> None:
     allowed = _TOOL_ALLOWED_ARGS.get(tool, set())
@@ -71,7 +100,8 @@ def _validate_step_arguments(index: int, tool: str, arguments: dict[str, Any]) -
     if unknown:
         raise PlanError(f"step {index} {tool} has unsupported arguments: {', '.join(unknown)}")
     if tool == "filter_apply":
-        operation = str(arguments.get("operation") or "").strip()
+        operation = _canonical_filter_operation(arguments.get("operation"))
+        arguments["operation"] = operation
         if operation not in _SAFE_FILTERS:
             raise PlanError(f"step {index} uses unsupported filter operation: {operation or '<empty>'}")
         if not isinstance(arguments.get("parameters", {}), dict):

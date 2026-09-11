@@ -72,11 +72,40 @@ class SessionManager:
         self._persist(s)
         return s
 
+    def _recover_one(self, session_id: str) -> ArtworkSession | None:
+        workdir = self.root / str(session_id)
+        document = workdir / "document.xcf"
+        if not workdir.is_dir() or not document.is_file():
+            return None
+        source = None
+        revision = 0
+        meta = workdir / "session.json"
+        if meta.exists():
+            try:
+                data = json.loads(meta.read_text(encoding="utf-8"))
+                source = Path(data["source"]) if data.get("source") else None
+                revision = int(data.get("revision") or 0)
+            except Exception:
+                pass
+        recovered = ArtworkSession(
+            str(session_id), workdir, document, source, revision,
+            sorted(workdir.glob("undo-*.xcf")), sorted(workdir.glob("redo-*.xcf")),
+        )
+        with self._lock:
+            return self._sessions.setdefault(str(session_id), recovered)
+
     def get(self, session_id: str) -> ArtworkSession:
+        session_id = str(session_id).strip()
         with self._lock:
             s = self._sessions.get(session_id)
+        if s is None:
+            s = self._recover_one(session_id)
         if not s:
             raise GimpMcpError("SESSION_NOT_FOUND", f"Unknown session: {session_id}")
+        if not s.document.is_file():
+            with self._lock:
+                self._sessions.pop(session_id, None)
+            raise GimpMcpError("SESSION_NOT_FOUND", f"Session document is no longer available: {session_id}")
         return s
 
     def snapshot(self, s: ArtworkSession) -> Path | None:

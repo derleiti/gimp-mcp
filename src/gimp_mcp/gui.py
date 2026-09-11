@@ -148,10 +148,13 @@ class ControlCenter(QMainWindow):
         self.studio_plan=QTextEdit(); self.studio_plan.setReadOnly(True)
         v.addWidget(self.studio_status); v.addWidget(self.studio_plan,1)
         self.studio_followup=QLineEdit()
-        self.studio_followup.setPlaceholderText("Quick prompt / follow-up — Enter sends. With no job this starts a new artwork.")
+        self.studio_followup.setPlaceholderText("Quick prompt — starts a new document unless Continue current artwork is enabled.")
         self.studio_followup.returnPressed.connect(self.studio_followup_send)
+        self.continue_current=QCheckBox("Continue current artwork")
+        self.continue_current.setChecked(False)
+        self.continue_current.setToolTip("Off by default: every new prompt starts a fresh GIMP document. Enable only when you explicitly want to edit the current artwork.")
         send=QPushButton("SEND"); send.clicked.connect(self.studio_followup_send)
-        fr=QHBoxLayout(); fr.addWidget(QLabel("Quick prompt / follow-up")); fr.addWidget(self.studio_followup,1); fr.addWidget(send); v.addLayout(fr)
+        fr=QHBoxLayout(); fr.addWidget(QLabel("Quick prompt")); fr.addWidget(self.studio_followup,1); fr.addWidget(self.continue_current); fr.addWidget(send); v.addLayout(fr)
         saved=CONTROL.load(); self.studio_provider.setCurrentText(saved.get("ai_provider","chatgpt")); self._studio_job_id=None
         QTimer.singleShot(150, self.studio_refresh_models)
         return w
@@ -273,9 +276,9 @@ class ControlCenter(QMainWindow):
         if not text:
             return
         self.studio_followup.clear()
-        if not self._studio_job_id:
-            # The compact input doubles as the initial prompt. Previously SEND
-            # silently did nothing until a job already existed.
+        if not self._studio_job_id or not self.continue_current.isChecked():
+            # Product rule: a new prompt starts a fresh document unless the user
+            # explicitly opts into continuing the current artwork.
             self.studio_prompt.setPlainText(text)
             self.studio_run()
             return
@@ -287,7 +290,7 @@ class ControlCenter(QMainWindow):
             return
         import threading
         threading.Thread(target=lambda: _mcp_prompt_runner().followup(job,text),daemon=True).start()
-        self.studio_status.setText(f"Follow-up queued for job {job.job_id[:8]}…")
+        self.studio_status.setText(f"Continuing current artwork in job {job.job_id[:8]}…")
 
     def studio_cooler(self):
         if not self._studio_job_id: return
@@ -647,14 +650,19 @@ class ControlCenter(QMainWindow):
         target,_=QFileDialog.getSaveFileName(self,f"Export {fmt.upper()}",str(default),filters[fmt])
         if not target: return
         try:
-            from gimp_mcp.server import exports, sessions
-            session=sessions.get(sid)
-            result=exports.export(session,target,fmt,overwrite=True)
+            from gimp_mcp.studio_mcp_client import StudioMcpClient
+            endpoint=os.getenv("GIMP_MCP_ENDPOINT", "http://127.0.0.1:8000/mcp")
+            client=StudioMcpClient(endpoint, bearer_token=os.getenv("GIMP_MCP_AUTH_TOKEN", ""))
+            response=client.call_tool("export_artwork", {"session_id":sid,"output_path":target,"format":fmt,"overwrite":True})
+            if not isinstance(response,dict) or response.get("ok") is False:
+                raise RuntimeError((response.get("error") or {}).get("message") if isinstance(response,dict) and isinstance(response.get("error"),dict) else str(response))
+            result=response.get("data") if isinstance(response.get("data"),dict) else response
             GUI_LOGGER.info("Export complete sid=%s format=%s output=%s", sid, fmt, result.get("output"))
             QMessageBox.information(self,"Export complete",f"Saved {fmt.upper()} to:\n{result['output']}")
         except Exception as exc:
             GUI_LOGGER.exception("Export failed sid=%s format=%s", sid, fmt)
-            QMessageBox.critical(self,"Export failed",str(exc))
+            self.refresh()
+            QMessageBox.critical(self,"Export failed",f"The selected artwork is no longer exportable or the MCP server rejected it.\n\n{exc}")
 
     def refresh(self):
         pid=self._server_pid(); self.server_status.setText(f"Server: {'RUNNING pid='+str(pid) if pid else 'STOPPED'}")

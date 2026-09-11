@@ -229,12 +229,74 @@ class GimpOperations:
         body += _save(s.document) + f"result={{'layer_id':layer_id,'action':{_q(action)}}}\nimg.delete()\n"
         return self._mutate(s, body)
 
+    @staticmethod
+    def _normalize_filter_parameters(operation: str, parameters: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(parameters, dict):
+            raise GimpMcpError("INVALID_ARGUMENT", "filter parameters must be an object", False)
+        op = str(operation).strip().lower()
+        params = dict(parameters)
+        aliases: dict[str, dict[str, str]] = {
+            "gegl:brightness-contrast": {"brightness_amount": "brightness", "contrast_amount": "contrast"},
+            "gegl:unsharp-mask": {"radius": "std-dev", "sigma": "std-dev", "amount": "scale"},
+            "gegl:color-temperature": {"original_temperature": "original-temperature", "source_temperature": "original-temperature", "temperature": "intended-temperature", "target_temperature": "intended-temperature"},
+            "gegl:shadows-highlights": {"white_point": "whitepoint", "shadow": "shadows", "highlight": "highlights"},
+        }
+        for old, new in aliases.get(op, {}).items():
+            if old in params and new not in params:
+                params[new] = params.pop(old)
+        if op == "gegl:brightness-contrast":
+            if "brightness_percent" in params and "brightness" not in params:
+                params["brightness"] = max(-100.0, min(100.0, float(params.pop("brightness_percent")))) / 100.0
+            if "contrast_percent" in params and "contrast" not in params:
+                params["contrast"] = 1.0 + max(-100.0, min(100.0, float(params.pop("contrast_percent")))) / 100.0
+            # Some models express both controls as familiar percentages (e.g. 5/5).
+            # Brightness outside GEGL's legal -3..3 range is an unambiguous signal.
+            try:
+                b = float(params.get("brightness")) if "brightness" in params else None
+            except (TypeError, ValueError):
+                b = None
+            if b is not None and abs(b) > 3.0 and abs(b) <= 100.0:
+                params["brightness"] = b / 100.0
+                if "contrast" in params:
+                    try:
+                        c = float(params["contrast"])
+                        if -100.0 <= c <= 100.0:
+                            params["contrast"] = 1.0 + c / 100.0
+                    except (TypeError, ValueError):
+                        pass
+        if op == "gegl:gaussian-blur":
+            # Models commonly call the single conceptual blur control radius/size/sigma.
+            scalar = None
+            for key in ("radius", "size", "sigma", "std-dev", "std_dev"):
+                if key in params:
+                    scalar = params.pop(key)
+                    break
+            if scalar is not None:
+                params.setdefault("std-dev-x", scalar)
+                params.setdefault("std-dev-y", scalar)
+            if "std_dev_x" in params and "std-dev-x" not in params:
+                params["std-dev-x"] = params.pop("std_dev_x")
+            if "std_dev_y" in params and "std-dev-y" not in params:
+                params["std-dev-y"] = params.pop("std_dev_y")
+        return params
+
     def filter_apply(self, s: ArtworkSession, layer_id: int, operation: str, parameters: dict[str, Any], name: str | None = None) -> dict[str, Any]:
-        body = _load(s.document) + _layer_lookup(layer_id)
-        body += f"operation={_q(operation)};params=json.loads({_q(json.dumps(parameters, ensure_ascii=False))});filter_name={_q(name or operation)}\n"
-        body += "flt=Gimp.DrawableFilter.new(layer,operation,filter_name)\nif flt is None: raise RuntimeError('FILTER_NOT_FOUND')\nconfig=flt.get_config()\n"
-        body += "for key,value in params.items(): config.set_property(key,value)\nflt.update();layer.append_filter(flt)\n"
-        body += _save(s.document) + "result={'layer_id':layer_id,'operation':operation,'name':filter_name,'filter_count':len(layer.get_filters())}\nimg.delete()\n"
+        operation = str(operation).strip().lower().replace("_", "-")
+        if not operation.startswith("gegl:"):
+            operation = "gegl:" + operation
+        params = self._normalize_filter_parameters(operation, parameters)
+        body = f"path={_q(s.document)}\nimg=Gimp.file_load(Gimp.RunMode.NONINTERACTIVE,Gio.File.new_for_path(path))\n"
+        body += "flt=None\nappended=False\ntry:\n"
+        body += f" layer_id={int(layer_id)}\n"
+        body += " layer=next((x for x in img.get_layers() if int(x.get_tattoo())==layer_id),None)\n if layer is None: raise RuntimeError('LAYER_NOT_FOUND')\n"
+        body += f" operation={_q(operation)}\n params=json.loads({_q(json.dumps(params, ensure_ascii=False))})\n filter_name={_q(name or operation)}\n"
+        body += " flt=Gimp.DrawableFilter.new(layer,operation,filter_name)\n if flt is None: raise RuntimeError('FILTER_NOT_FOUND:'+operation)\n"
+        body += " config=flt.get_config()\n valid={spec.name for spec in config.list_properties()}\n unknown=sorted(set(params)-valid)\n"
+        body += " if unknown: raise RuntimeError('UNSUPPORTED_FILTER_PROPERTIES:'+operation+':'+','.join(unknown)+'; valid='+','.join(sorted(valid)))\n"
+        body += " for key,value in params.items(): config.set_property(key,value)\n flt.update()\n layer.append_filter(flt)\n appended=True\n"
+        body += f" Gimp.file_save(Gimp.RunMode.NONINTERACTIVE,img,Gio.File.new_for_path({_q(s.document)}),None)\n"
+        body += " result={'layer_id':layer_id,'operation':operation,'name':filter_name,'parameters':params,'filter_count':len(layer.get_filters())}\n"
+        body += "finally:\n if flt is not None and not appended and flt.is_valid(): flt.delete()\n if img is not None and img.is_valid(): img.delete()\n"
         return self._mutate(s, body)
 
     def filter_list(self, query: str, limit: int) -> dict[str, Any]:

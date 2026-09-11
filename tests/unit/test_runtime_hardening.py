@@ -23,3 +23,15 @@ def test_new_snapshot_removes_stale_redo_files(tmp_path: Path):
     sessions.snapshot(s)
     assert s.redo_stack == []
     assert not redo_path.exists()
+
+
+def test_session_manager_lazy_recovers_cross_process_session(tmp_path):
+    from gimp_mcp.sessions import SessionManager
+    first=SessionManager(tmp_path)
+    created=first.create()
+    created.document.write_bytes(b"xcf")
+    second=SessionManager(tmp_path)
+    second._sessions.clear()
+    recovered=second.get(created.session_id)
+    assert recovered.session_id == created.session_id
+    assert recovered.document.read_bytes() == b"xcf"

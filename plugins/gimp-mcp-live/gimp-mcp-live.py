@@ -27,6 +27,11 @@ class GimpMcpLive(Gimp.PlugIn):
         self._image = None
         self._lock = threading.Lock()
 
+    def do_set_i18n(self, procedure_name):
+        # This plug-in currently ships English-only UI strings and no gettext catalog.
+        # Explicitly disable localization so GIMP does not probe a non-existent locale dir.
+        return False, None, None
+
     def do_query_procedures(self):
         if os.environ.get('GIMP_MCP_BATCH') == '1':
             return []
