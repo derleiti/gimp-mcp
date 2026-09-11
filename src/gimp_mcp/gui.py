@@ -16,6 +16,7 @@ from PyQt6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
 from gimp_mcp.control_settings import ControlSettings
 from gimp_mcp.live_bridge import LiveBridge
 from gimp_mcp.setup_manager import SetupManager
+from gimp_mcp.service_manager import ServiceManager
 from gimp_mcp.first_run import SetupWizard
 
 from PyQt6.QtWidgets import (
@@ -331,16 +332,22 @@ class ControlCenter(QMainWindow):
 
     def _server_tab(self):
         w=QWidget(); v=QVBoxLayout(w)
-        self.server_status=QLabel(); row=QHBoxLayout();
-        start=QPushButton("Start MCP Server"); stop=QPushButton("Stop MCP Server"); start.clicked.connect(self.start_server); stop.clicked.connect(self.stop_server)
+        self.server_status=QLabel(); self.service_status=QLabel(); row=QHBoxLayout();
+        install_service=QPushButton("Install / Repair Service"); install_service.clicked.connect(self.install_server_service)
+        start=QPushButton("Start"); stop=QPushButton("Stop"); restart=QPushButton("Restart")
+        enable=QPushButton("Enable Autostart"); disable=QPushButton("Disable Autostart")
+        start.clicked.connect(lambda:self.server_service_action("start")); stop.clicked.connect(lambda:self.server_service_action("stop")); restart.clicked.connect(lambda:self.server_service_action("restart"))
+        enable.clicked.connect(lambda:self.server_service_action("enable")); disable.clicked.connect(lambda:self.server_service_action("disable"))
+        logs=QPushButton("Service Logs"); logs.clicked.connect(self.show_server_service_logs)
         live_install=QPushButton('Install / Update GIMP Live Plug-in'); live_install.clicked.connect(self.install_live_plugin)
-        row.addWidget(start); row.addWidget(stop); row.addWidget(live_install); row.addStretch()
+        for button in (install_service,start,stop,restart,enable,disable,logs,live_install): row.addWidget(button)
+        row.addStretch()
         saved=CONTROL.load(); initial_host=str(saved.get("mcp_bind_host","127.0.0.1")); initial_port=int(saved.get("mcp_port",8000))
         self.endpoint=QLineEdit(f"http://{initial_host}:{initial_port}/mcp"); self.endpoint.setReadOnly(True)
         copy_endpoint=QPushButton("Copy endpoint"); copy_endpoint.clicked.connect(lambda: QApplication.clipboard().setText(self.endpoint.text()))
         copy_config=QPushButton("Copy client config"); copy_config.clicked.connect(self.copy_mcp_client_config)
         endpoint_row=QHBoxLayout(); endpoint_row.addWidget(self.endpoint,1); endpoint_row.addWidget(copy_endpoint); endpoint_row.addWidget(copy_config)
-        v.addWidget(self.server_status); v.addLayout(row); v.addWidget(QLabel("Streamable HTTP endpoint (for MCP clients — not a browser chat page)")); v.addLayout(endpoint_row)
+        v.addWidget(self.server_status); v.addWidget(self.service_status); v.addLayout(row); v.addWidget(QLabel("The recommended mode is the per-user systemd service. It starts at login when enabled and is independent of the Control Center window.")); v.addWidget(QLabel("Streamable HTTP endpoint (for MCP clients — not a browser chat page)")); v.addLayout(endpoint_row)
         v.addWidget(QLabel('Opening /mcp directly in a browser may show "Missing session ID"; that is expected because a browser GET does not perform the MCP initialize handshake.'))
         v.addWidget(QLabel('Live GIMP mode: install the plug-in once, then restart GIMP. When connected, successful MCP edits are mirrored into the visible GIMP display.'))
         v.addStretch(); return w
@@ -551,6 +558,43 @@ class ControlCenter(QMainWindow):
             except ProcessLookupError: pass
         PIDFILE.unlink(missing_ok=True); self.refresh()
 
+    def _service_manager(self):
+        return ServiceManager(ROOT, STATE)
+
+    def install_server_service(self):
+        try:
+            # Avoid a duplicate legacy GUI-owned process before handing ownership to systemd.
+            pid=self._server_pid()
+            if pid:
+                self.stop_server()
+            status=self._service_manager().install(enable=True,start=True)
+            self.statusBar().showMessage("MCP service installed, enabled and started.",5000)
+            self.refresh()
+            QMessageBox.information(self,"MCP Service",f"Installed {status['unit']}\nAutostart: {status['enabled']}\nState: {status['active']}")
+        except Exception as exc:
+            QMessageBox.critical(self,"MCP Service",str(exc))
+
+    def server_service_action(self, action):
+        try:
+            manager=self._service_manager()
+            if not manager.installed():
+                if action == "start":
+                    self.install_server_service(); return
+                raise RuntimeError("Install the MCP service first.")
+            status=manager.action(action)
+            self.statusBar().showMessage(f"MCP service {action}: {status['active']} / {status['enabled']}",5000)
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.critical(self,"MCP Service",str(exc))
+
+    def show_server_service_logs(self):
+        try:
+            text=self._service_manager().logs(120)
+            self.log.setPlainText(text)
+            self.tabs.setCurrentIndex(1)
+        except Exception as exc:
+            QMessageBox.critical(self,"MCP Service Logs",str(exc))
+
     def install_live_plugin(self):
         script=ROOT/"scripts/install-gimp-live-plugin"
         try:
@@ -699,7 +743,13 @@ class ControlCenter(QMainWindow):
             QMessageBox.critical(self,"Export failed",f"The selected artwork is no longer exportable or the MCP server rejected it.\n\n{exc}")
 
     def refresh(self):
-        pid=self._server_pid(); self.server_status.setText(f"Server: {'RUNNING pid='+str(pid) if pid else 'STOPPED'}")
+        service=self._service_manager().status()
+        pid=self._server_pid()
+        if service.get("active") == "active":
+            self.server_status.setText(f"Server: RUNNING via systemd · pid={service.get('pid') or '?'}")
+        else:
+            self.server_status.setText(f"Server: {'RUNNING legacy pid='+str(pid) if pid else 'STOPPED'}")
+        self.service_status.setText(f"systemd: {'INSTALLED' if service.get('installed') else 'NOT INSTALLED'} · state={service.get('active')} · autostart={service.get('enabled')}")
         live=LiveBridge(timeout=0.25).status()
         if live.get('stale_socket_removed'):
             GUI_LOGGER.info("Removed stale GIMP live socket %s", live.get('socket'))

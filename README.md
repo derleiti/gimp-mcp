@@ -206,3 +206,7 @@ Useful expert tools:
 
 The headless pool is a fallback, not a replacement for interactive GIMP. If a
 visible bridge appears, new bridge requests prefer it automatically.
+
+### systemd service / Control Center
+
+The recommended server runtime is the per-user `gimp-mcp.service`. The Control Center can install or repair it, enable/disable login autostart, start, stop and restart it, and show its journal. The service is independent from the GUI: closing the Control Center does not stop MCP or its headless GIMP workers. Runtime bind/auth/GIMP settings are loaded from `~/.local/state/gimp-mcp/control.json` each time the service starts.
