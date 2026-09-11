@@ -2,6 +2,16 @@
 
 ## 0.4.0 - 2026-09-11
 
+### Autonomous runtime debugging and model-tolerance hardening
+- Added `scripts/auto-debug` with persistent JSONL diagnostics for tests, providers, previews, exports, live bridge and MCP transport.
+- Added rotating GUI exception/runtime logging under `~/.local/state/gimp-mcp/gui.log`.
+- Fixed headless GIMP spawning the persistent live plug-in and leaving stale Unix sockets after batch operations.
+- Added stale live-socket cleanup for refused connections.
+- Expanded `layer_create` to safely accept common model-produced opacity, visibility and blend-mode arguments.
+- Normalized transform values supplied as semantic objects (`{x,y}`, `{dx,dy}`, rotate/scale objects) as well as arrays.
+- Added regression coverage for batch/live isolation and transform normalization.
+
+
 ### Live preview and export completion
 - Live preview rendering is now atomic (`preview.tmp.png` -> `preview.png`) to prevent partial-frame reads.
 - Qt preview loading now reads image bytes, validates them, keeps the last complete frame on transient errors, and rescales on window resize.

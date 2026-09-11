@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parents[1]
+PYTHON=ROOT/'.venv/bin/python'
+STATE=Path(os.getenv('GIMP_MCP_STATE_DIR', str(Path.home()/'.local/state/gimp-mcp')))
+SESSIONS=Path(os.getenv('GIMP_MCP_SESSION_ROOT','/tmp/gimp-mcp/sessions'))
+LOG=STATE/'auto-debug.log'
+
+
+def record(label, ok, detail=''):
+    line={'time':time.time(),'check':label,'ok':bool(ok),'detail':str(detail)}
+    print(('OK ' if ok else 'FAIL ')+label+(' :: '+str(detail) if detail else ''))
+    STATE.mkdir(parents=True,exist_ok=True)
+    with LOG.open('a',encoding='utf-8') as f: f.write(json.dumps(line,ensure_ascii=False)+'\n')
+    return bool(ok)
+
+
+def run(args, timeout=60):
+    return subprocess.run(args,cwd=ROOT,text=True,capture_output=True,timeout=timeout)
+
+
+def main():
+    venv_root=(ROOT/'.venv').resolve()
+    if PYTHON.exists() and Path(sys.prefix).resolve() != venv_root:
+        os.execv(str(PYTHON), [str(PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+    failures=0
+    r=run([str(PYTHON),'-m','pytest','-q'],120)
+    failures += not record('pytest',r.returncode==0,(r.stdout+r.stderr).strip().splitlines()[-1] if (r.stdout+r.stderr).strip() else '')
+
+    r=run([str(PYTHON),'-c','from gimp_mcp.live_bridge import LiveBridge; import json; print(json.dumps(LiveBridge(timeout=.2).status()))'])
+    try: live=json.loads(r.stdout.strip()); ok=True
+    except Exception: live={'raw':(r.stdout+r.stderr)[-500:]}; ok=False
+    record('live-bridge-status',ok,live)
+
+    for provider in ('claude','mistral','chatgpt','gemini'):
+        r=run([str(PYTHON),'-m','gimp_mcp.provider_cli','status',provider],30)
+        failures += not record(f'provider-{provider}',r.returncode==0,(r.stdout or r.stderr).strip()[-500:])
+
+    previews=sorted(SESSIONS.glob('*/preview.png'),key=lambda p:p.stat().st_mtime if p.exists() else 0)
+    if previews:
+        latest=previews[-1]
+        sig=latest.read_bytes()[:8]
+        failures += not record('latest-preview',sig==b'\x89PNG\r\n\x1a\n',f'{latest} {latest.stat().st_size} bytes')
+    else:
+        record('latest-preview',True,'no preview present')
+
+    docs=sorted(SESSIONS.glob('*/document.xcf'),key=lambda p:p.stat().st_mtime if p.exists() else 0)
+    if docs:
+        sid=docs[-1].parent.name
+        with tempfile.TemporaryDirectory(prefix='gimp-mcp-autodebug-') as tmp:
+            code=("from pathlib import Path; from gimp_mcp.server import sessions,exports; "
+                  f"s=sessions.get({sid!r}); p=Path({tmp!r})/'smoke.png'; "
+                  "print(exports.export(s,p,'png',overwrite=True)); print(p.exists(),p.stat().st_size)")
+            r=run([str(PYTHON),'-c',code],60)
+            failures += not record('export-png-smoke',r.returncode==0 and 'True' in r.stdout,(r.stdout or r.stderr).strip()[-500:])
+
+    async def mcp_check():
+        from mcp import Client
+        async with Client('http://127.0.0.1:8000/mcp',raise_exceptions=True) as c:
+            tools=(await c.list_tools()).tools
+            names={t.name for t in tools}
+            return len(names), {'preview_render','export_artwork','artwork_job_run'}.issubset(names)
+    try:
+        count,ok=asyncio.run(mcp_check()); failures += not record('mcp-handshake',ok,f'{count} tools')
+    except Exception as exc:
+        failures += not record('mcp-handshake',False,repr(exc))
+
+    record('summary',failures==0,f'{failures} failing checks')
+    return 1 if failures else 0
+
+if __name__=='__main__': raise SystemExit(main())

@@ -158,3 +158,7 @@ Studio plans can use `$background_layer_id` for the initial layer and `$last_lay
 
 ### Live preview and export
 The Control Center Live view refreshes `preview.png` from the selected artwork session and exposes **EXPORT XCF**, **EXPORT PNG**, and **EXPORT JPG**. Studio exposes compact XCF/PNG/JPG export buttons as well. XCF copies the canonical editable `document.xcf`; PNG/JPG are rendered by GIMP from that same document. The MCP surface also exposes `export_artwork`.
+
+### Autonomous diagnostics
+
+Run `./scripts/auto-debug` for a repeatable health pass. It records results in `~/.local/state/gimp-mcp/auto-debug.log` and checks the test suite, native provider status, latest preview integrity, a real PNG export, the live bridge state, and the Streamable HTTP MCP handshake. GUI runtime exceptions are written to `~/.local/state/gimp-mcp/gui.log`.

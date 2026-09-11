@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import signal
 import subprocess
@@ -27,6 +29,20 @@ ROOT = Path(os.getenv("GIMP_MCP_ROOT", str(Path.home() / "gimp-mcp"))).resolve()
 PROJECT_PYTHON = ROOT / ".venv/bin/python"
 CONTROL = ControlSettings(STATE / "control.json")
 
+GUI_LOG = STATE / "gui.log"
+
+def _configure_gui_logging() -> logging.Logger:
+    logger=logging.getLogger("gimp_mcp.gui")
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        handler=RotatingFileHandler(GUI_LOG,maxBytes=1_000_000,backupCount=3,encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        logger.propagate=False
+    return logger
+
+GUI_LOGGER = _configure_gui_logging()
+
 
 class ControlCenter(QMainWindow):
     def __init__(self) -> None:
@@ -34,6 +50,7 @@ class ControlCenter(QMainWindow):
         self.setWindowTitle("GIMP MCP Control Center")
         self.resize(1180, 760)
         STATE.mkdir(parents=True, exist_ok=True)
+        GUI_LOGGER.info("Control Center starting pid=%s root=%s sessions=%s", os.getpid(), ROOT, SESSIONS)
         tabs = QTabWidget(); self.setCentralWidget(tabs)
         tabs.addTab(self._studio_tab(), "Studio")
         tabs.addTab(self._live_tab(), "Live")
@@ -123,7 +140,8 @@ class ControlCenter(QMainWindow):
                     label=str(item.get("display") or item.get("displayName") or item.get("name") or mid)
                     if mid: self.studio_model.addItem(label,mid)
                 else: self.studio_model.addItem(str(item),str(item))
-        except Exception: pass
+        except Exception as exc:
+            GUI_LOGGER.warning("Studio model catalog parse failed provider=%s error=%s stderr=%s", provider, exc, bytes(proc.readAllStandardError()).decode("utf-8","replace")[-500:])
         preferred=current or wanted
         if preferred:
             self._select_studio_model(preferred)
@@ -496,13 +514,17 @@ class ControlCenter(QMainWindow):
             from gimp_mcp.server import exports, sessions
             session=sessions.get(sid)
             result=exports.export(session,target,fmt,overwrite=True)
+            GUI_LOGGER.info("Export complete sid=%s format=%s output=%s", sid, fmt, result.get("output"))
             QMessageBox.information(self,"Export complete",f"Saved {fmt.upper()} to:\n{result['output']}")
         except Exception as exc:
+            GUI_LOGGER.exception("Export failed sid=%s format=%s", sid, fmt)
             QMessageBox.critical(self,"Export failed",str(exc))
 
     def refresh(self):
         pid=self._server_pid(); self.server_status.setText(f"Server: {'RUNNING pid='+str(pid) if pid else 'STOPPED'}")
         live=LiveBridge(timeout=0.25).status()
+        if live.get('stale_socket_removed'):
+            GUI_LOGGER.info("Removed stale GIMP live socket %s", live.get('socket'))
         if live.get('ok'):
             self.live_bridge_label.setText(f"GIMP Live Bridge: CONNECTED · GIMP {live.get('gimp_version','?')}")
         else:
@@ -525,6 +547,7 @@ class ControlCenter(QMainWindow):
         self._studio_refresh_job()
 
     def closeEvent(self, event):
+        GUI_LOGGER.info("Control Center closing pid=%s", os.getpid())
         # QProcess children can otherwise finish during Qt teardown and call
         # slots on already-destroyed wrappers. Stop only helper processes we own.
         for attr in ("_studio_models_process", "_provider_process"):
@@ -547,6 +570,10 @@ class ControlCenter(QMainWindow):
 
 
 def main():
+    def _excepthook(exc_type, exc, tb):
+        GUI_LOGGER.critical("Uncaught exception", exc_info=(exc_type, exc, tb))
+        sys.__excepthook__(exc_type, exc, tb)
+    sys.excepthook=_excepthook
     app=QApplication(sys.argv); win=ControlCenter(); win.show(); return app.exec()
 
 if __name__ == "__main__": raise SystemExit(main())

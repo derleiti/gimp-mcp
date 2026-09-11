@@ -29,3 +29,15 @@ def test_live_bridge_ping(tmp_path: Path):
     thread.join(timeout=1)
     assert status['ok'] is True
     assert status['mode'] == 'persistent'
+
+
+def test_status_removes_stale_unix_socket(tmp_path):
+    import socket
+    path=tmp_path/'stale.sock'
+    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+    sock.bind(str(path)); sock.close()
+    bridge=LiveBridge(path,timeout=0.02)
+    status=bridge.status()
+    assert status['ok'] is False
+    assert status.get('stale_socket_removed') is True
+    assert not path.exists()

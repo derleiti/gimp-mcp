@@ -21,7 +21,15 @@ or tools outside this allowlist: %s. Keep the plan short and executable.
 The session_id is injected by the host; never invent one.
 For layer IDs created during this plan, use the exact string "$last_layer_id".
 For the initial/background layer use "$background_layer_id" when available.
-Never invent numeric layer IDs.""" % ", ".join(sorted(ALLOWED_TOOLS))
+Never invent numeric layer IDs.
+Tool argument guide:
+- layer_create: name, optional width, height, opacity (0..100), visible, blend_mode.
+- layer_fill: layer_id, color.
+- layer_update: layer_id, optional name, visible, opacity.
+- text_create: text, x, y, optional size, font_name.
+- transform_layer: layer_id, action, values; prefer translate values=[dx,dy], rotate=[degrees], scale=[x0,y0,x1,y1]. Semantic objects are also accepted.
+- filter_apply: layer_id, operation, parameters, optional name.
+Do not add undocumented arguments.""" % ", ".join(sorted(ALLOWED_TOOLS))
 
 
 class PlanError(ValueError):

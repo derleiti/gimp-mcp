@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -38,9 +39,22 @@ class LiveBridge:
         except Exception:
             return False
 
+    def _cleanup_stale_socket(self) -> bool:
+        try:
+            st = self.socket_path.lstat()
+            if stat.S_ISSOCK(st.st_mode):
+                self.socket_path.unlink(missing_ok=True)
+                return True
+        except OSError:
+            pass
+        return False
+
     def status(self) -> dict[str, Any]:
         try:
             return self.request('ping')
+        except (ConnectionRefusedError, FileNotFoundError) as exc:
+            cleaned = self._cleanup_stale_socket() if isinstance(exc, ConnectionRefusedError) else False
+            return {'ok': False, 'mode': 'batch', 'error': str(exc), 'socket': str(self.socket_path), 'stale_socket_removed': cleaned}
         except Exception as exc:
             return {'ok': False, 'mode': 'batch', 'error': str(exc), 'socket': str(self.socket_path)}
 

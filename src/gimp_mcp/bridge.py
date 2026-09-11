@@ -32,6 +32,9 @@ class GimpBridge:
         env.pop("VIRTUAL_ENV", None)
         env.pop("PYTHONHOME", None)
         env.pop("PYTHONPATH", None)
+        # Headless helper GIMP processes must never start the persistent live
+        # plug-in socket; otherwise every batch call leaves a stale socket behind.
+        env["GIMP_MCP_BATCH"] = "1"
         return env
 
     def run_python(self, code: str, *, timeout: int | None = None) -> GimpResult:

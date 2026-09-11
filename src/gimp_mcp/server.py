@@ -161,9 +161,9 @@ def document_save_as(session_id: str, output_xcf: str, overwrite: bool = False) 
     except GimpMcpError as exc: return exc.as_dict()
 
 @mcp.tool()
-def layer_create(session_id: str, name: str = 'Layer', width: int | None = None, height: int | None = None) -> dict[str, Any]:
-    '''Create a transparent layer. Width/height default to canvas dimensions. Returns a persistent GIMP tattoo-based layer_id.'''
-    return _call(ops.layer_create, sessions.get(session_id), name, width, height)
+def layer_create(session_id: str, name: str = 'Layer', width: int | None = None, height: int | None = None, opacity: float = 100.0, visible: bool = True, blend_mode: str = 'normal') -> dict[str, Any]:
+    '''Create a transparent layer. Width/height default to canvas dimensions. opacity is 0..100; blend_mode accepts normal/multiply/screen/overlay and other valid GIMP LayerMode names. Returns a persistent layer_id.'''
+    return _call(ops.layer_create, sessions.get(session_id), name, width, height, opacity=opacity, visible=visible, blend_mode=blend_mode)
 
 @mcp.tool()
 def layer_delete(session_id: str, layer_id: int) -> dict[str, Any]:
@@ -196,8 +196,8 @@ def text_create(session_id: str, text: str, x: float, y: float, size: float = 64
     return _call(ops.text_create, sessions.get(session_id), text, x, y, size, font_name)
 
 @mcp.tool()
-def transform_layer(session_id: str, layer_id: int, action: Literal['translate','rotate','scale'], values: list[float]) -> dict[str, Any]:
-    '''Transform one layer. translate=[dx,dy] pixels; rotate=[degrees] or [degrees,cx,cy]; scale=[x0,y0,x1,y1].'''
+def transform_layer(session_id: str, layer_id: int, action: Literal['translate','rotate','scale'], values: Any) -> dict[str, Any]:
+    '''Transform one layer. values may be arrays or semantic objects: translate=[dx,dy] or {x,y}/{dx,dy}; rotate=[degrees] or {degrees,cx,cy}; scale=[x0,y0,x1,y1] or {x,y,width,height}.'''
     return _call(ops.transform, sessions.get(session_id), layer_id, action, values)
 
 @mcp.tool()

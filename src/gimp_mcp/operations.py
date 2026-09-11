@@ -80,11 +80,20 @@ class GimpOperations:
     def document_info(self, s: ArtworkSession) -> dict[str, Any]:
         return self.bridge.run_json(_load(s.document) + "layers=img.get_layers()\nresult={'width':img.get_width(),'height':img.get_height(),'layer_count':len(layers),'layers':[{'layer_id':int(x.get_tattoo()),'name':x.get_name(),'width':x.get_width(),'height':x.get_height(),'visible':x.get_visible(),'opacity':x.get_opacity()} for x in layers]}\nimg.delete()\n")
 
-    def layer_create(self, s: ArtworkSession, name: str, width: int | None, height: int | None) -> dict[str, Any]:
+    def layer_create(self, s: ArtworkSession, name: str, width: int | None, height: int | None, *, opacity: float = 100.0, visible: bool = True, blend_mode: str = "normal") -> dict[str, Any]:
+        if not 0 <= float(opacity) <= 100:
+            raise GimpMcpError('INVALID_ARGUMENT', 'opacity must be 0..100', False)
+        aliases = {
+            'normal': 'NORMAL', 'multiply': 'MULTIPLY', 'screen': 'SCREEN',
+            'overlay': 'OVERLAY', 'addition': 'ADDITION', 'subtract': 'SUBTRACT',
+            'darken': 'DARKEN_ONLY', 'lighten': 'LIGHTEN_ONLY',
+        }
+        key = str(blend_mode or 'normal').strip().lower().replace('-', '_').replace(' ', '_')
+        enum_name = aliases.get(key, key.upper())
         tattoo = random.randint(100000, 2_000_000_000)
-        body = _load(s.document) + f"name={_q(name)};w={int(width) if width else 0};h={int(height) if height else 0};tattoo={tattoo}\n"
-        body += "w=w or img.get_width();h=h or img.get_height();img.undo_group_start()\nlayer=Gimp.Layer.new(img,name,w,h,Gimp.ImageType.RGBA_IMAGE,100.0,Gimp.LayerMode.NORMAL)\nimg.insert_layer(layer,None,0);layer.fill(Gimp.FillType.TRANSPARENT);layer.set_tattoo(tattoo);img.undo_group_end()\n"
-        body += _save(s.document) + "result={'layer_id':tattoo,'name':name,'width':w,'height':h}\nimg.delete()\n"
+        body = _load(s.document) + f"name={_q(name)};w={int(width) if width else 0};h={int(height) if height else 0};tattoo={tattoo};opacity={float(opacity)};visible={bool(visible)};mode_name={_q(enum_name)}\n"
+        body += "w=w or img.get_width();h=h or img.get_height();mode=getattr(Gimp.LayerMode,mode_name,None)\nif mode is None: raise RuntimeError('UNSUPPORTED_BLEND_MODE:'+mode_name)\nimg.undo_group_start()\nlayer=Gimp.Layer.new(img,name,w,h,Gimp.ImageType.RGBA_IMAGE,opacity,mode)\nimg.insert_layer(layer,None,0);layer.fill(Gimp.FillType.TRANSPARENT);layer.set_tattoo(tattoo);layer.set_visible(visible);img.undo_group_end()\n"
+        body += _save(s.document) + "result={'layer_id':tattoo,'name':name,'width':w,'height':h,'opacity':layer.get_opacity(),'visible':layer.get_visible(),'blend_mode':mode_name}\nimg.delete()\n"
         return self._mutate(s, body)
 
     def layer_delete(self, s: ArtworkSession, layer_id: int) -> dict[str, Any]:
@@ -148,7 +157,38 @@ class GimpOperations:
         body += _save(s.document) + "result={'layer_id':tattoo,'text':text,'font':font_name,'size':size,'x':x,'y':y}\nimg.delete()\n"
         return self._mutate(s, body)
 
-    def transform(self, s: ArtworkSession, layer_id: int, action: str, values: list[float]) -> dict[str, Any]:
+    @staticmethod
+    def _normalize_transform_values(action: str, values: Any) -> list[float]:
+        action = str(action).strip().lower()
+        if isinstance(values, dict):
+            if action == 'translate':
+                x = values.get('x', values.get('dx'))
+                y = values.get('y', values.get('dy'))
+                if x is not None and y is not None:
+                    return [float(x), float(y)]
+            elif action == 'rotate':
+                angle = values.get('degrees', values.get('angle'))
+                if angle is not None:
+                    cx = values.get('cx', values.get('center_x'))
+                    cy = values.get('cy', values.get('center_y'))
+                    return [float(angle)] if cx is None or cy is None else [float(angle), float(cx), float(cy)]
+            elif action == 'scale':
+                keys = ('x0', 'y0', 'x1', 'y1')
+                if all(k in values for k in keys):
+                    return [float(values[k]) for k in keys]
+                if all(k in values for k in ('x', 'y', 'width', 'height')):
+                    x=float(values['x']); y=float(values['y'])
+                    return [x, y, x+float(values['width']), y+float(values['height'])]
+        if isinstance(values, (list, tuple)):
+            try:
+                return [float(v) for v in values]
+            except (TypeError, ValueError) as exc:
+                raise GimpMcpError('INVALID_ARGUMENT', 'transform values must be numeric', False) from exc
+        raise GimpMcpError('INVALID_ARGUMENT', f'unsupported transform values for {action}: expected list or object', False)
+
+    def transform(self, s: ArtworkSession, layer_id: int, action: str, values: Any) -> dict[str, Any]:
+        action = str(action).strip().lower()
+        values = self._normalize_transform_values(action, values)
         if action == 'translate' and len(values) == 2 and self._live_ready():
             with s.lock:
                 snap = self.sessions.snapshot(s)

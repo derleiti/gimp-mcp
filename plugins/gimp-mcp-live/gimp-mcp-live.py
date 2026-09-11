@@ -28,6 +28,8 @@ class GimpMcpLive(Gimp.PlugIn):
         self._lock = threading.Lock()
 
     def do_query_procedures(self):
+        if os.environ.get('GIMP_MCP_BATCH') == '1':
+            return []
         return [PROC]
 
     def do_create_procedure(self, name):
@@ -43,6 +45,8 @@ class GimpMcpLive(Gimp.PlugIn):
         return proc
 
     def _run(self, procedure, *args):
+        if os.environ.get('GIMP_MCP_BATCH') == '1':
+            return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, None)
         SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
         try:
             SOCKET_PATH.unlink(missing_ok=True)
