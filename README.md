@@ -155,3 +155,6 @@ Direct persistent editing currently covers layer rename, visibility, opacity and
 See `docs/QUICKSTART.md` and `CHANGELOG.md`.
 
 Studio plans can use `$background_layer_id` for the initial layer and `$last_layer_id` for a layer created earlier in the same plan; numeric IDs should never be invented by a model.
+
+### Live preview and export
+The Control Center Live view refreshes `preview.png` from the selected artwork session and exposes **EXPORT XCF**, **EXPORT PNG**, and **EXPORT JPG**. Studio exposes compact XCF/PNG/JPG export buttons as well. XCF copies the canonical editable `document.xcf`; PNG/JPG are rendered by GIMP from that same document. The MCP surface also exposes `export_artwork`.

@@ -2,6 +2,15 @@
 
 ## 0.4.0 - 2026-09-11
 
+### Live preview and export completion
+- Live preview rendering is now atomic (`preview.tmp.png` -> `preview.png`) to prevent partial-frame reads.
+- Qt preview loading now reads image bytes, validates them, keeps the last complete frame on transient errors, and rescales on window resize.
+- Added XCF, PNG and JPG export from the canonical session document in both Studio and Live views.
+- Added `export_artwork` MCP tool for explicit XCF/PNG/JPG output.
+- Added `ExportService` with suffix normalization and overwrite handling.
+- Hardened Qt helper-process shutdown to avoid QProcess teardown races.
+
+
 ### Provider routing hardening
 - Reject cross-provider account model IDs before invoking any official CLI.
 - Prevent stale asynchronous model catalogues from overwriting the currently selected provider.

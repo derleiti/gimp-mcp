@@ -8,14 +8,14 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QProcess, QTimer, Qt
-from PyQt6.QtGui import QKeySequence, QPixmap, QShortcut
+from PyQt6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
 from gimp_mcp.control_settings import ControlSettings
 from gimp_mcp.live_bridge import LiveBridge
 from gimp_mcp.setup_manager import SetupManager
 
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QMainWindow, QMessageBox, QPushButton, QSpinBox, QTabWidget,
+    QApplication, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSpinBox, QTabWidget,
     QTextEdit, QVBoxLayout, QWidget
 )
 
@@ -63,8 +63,10 @@ class ControlCenter(QMainWindow):
         v.addWidget(QLabel("Prompt")); v.addWidget(self.studio_prompt,1)
         row=QHBoxLayout()
         run=QPushButton("RUN"); pause=QPushButton("PAUSE"); stop=QPushButton("STOP"); undo=QPushButton("UNDO"); redo=QPushButton("REDO"); cooler=QPushButton("MAKE IT COOLER")
+        exp_xcf=QPushButton("XCF"); exp_png=QPushButton("PNG"); exp_jpg=QPushButton("JPG")
         run.clicked.connect(self.studio_run); pause.clicked.connect(self.studio_pause); stop.clicked.connect(self.studio_stop); undo.clicked.connect(self.studio_undo); redo.clicked.connect(self.studio_redo); cooler.clicked.connect(self.studio_cooler)
-        for b in (run,pause,stop,undo,redo,cooler): row.addWidget(b)
+        exp_xcf.clicked.connect(lambda: self.export_selected_artwork("xcf")); exp_png.clicked.connect(lambda: self.export_selected_artwork("png")); exp_jpg.clicked.connect(lambda: self.export_selected_artwork("jpg"))
+        for b in (run,pause,stop,undo,redo,cooler,exp_xcf,exp_png,exp_jpg): row.addWidget(b)
         row.addStretch(); v.addLayout(row)
         self.studio_status=QLabel("No active job")
         self.studio_plan=QTextEdit(); self.studio_plan.setReadOnly(True)
@@ -214,8 +216,22 @@ class ControlCenter(QMainWindow):
         self.log=QTextEdit(); self.log.setReadOnly(True)
         self.live_bridge_label=QLabel('GIMP Live Bridge: checking...')
         left.addWidget(self.live_bridge_label); left.addWidget(QLabel("Artwork sessions")); left.addWidget(self.sessions,1); left.addWidget(QLabel("Live operations")); left.addWidget(self.log,2)
-        self.preview=QLabel("No preview yet"); self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.preview.setMinimumSize(520,420)
-        right.addWidget(QLabel("Live preview")); right.addWidget(self.preview,1)
+        self.preview=QLabel("No preview yet")
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setMinimumSize(520,420)
+        self.preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.preview.setStyleSheet("QLabel { border: 1px solid palette(mid); background: palette(base); }")
+        self._preview_pixmap=None
+        self._preview_signature=None
+        self._preview_session_id=None
+        export_row=QHBoxLayout()
+        export_xcf=QPushButton("EXPORT XCF"); export_png=QPushButton("EXPORT PNG"); export_jpg=QPushButton("EXPORT JPG")
+        export_xcf.clicked.connect(lambda: self.export_selected_artwork("xcf"))
+        export_png.clicked.connect(lambda: self.export_selected_artwork("png"))
+        export_jpg.clicked.connect(lambda: self.export_selected_artwork("jpg"))
+        for b in (export_xcf,export_png,export_jpg): export_row.addWidget(b)
+        export_row.addStretch()
+        right.addWidget(QLabel("Live preview")); right.addWidget(self.preview,1); right.addLayout(export_row)
         outer.addLayout(left,1); outer.addLayout(right,2); return w
 
     def _server_tab(self):
@@ -407,13 +423,82 @@ class ControlCenter(QMainWindow):
         self.provider_output.setPlainText(f"Started native {provider} login flow in the official client. Complete it, then refresh models/status.")
 
     def _session_changed(self, sid):
-        self._load_preview(sid)
+        sid=str(sid or "").strip()
+        self._preview_session_id=sid or None
+        self._preview_signature=None
+        self._load_preview(sid, force=True)
 
-    def _load_preview(self, sid):
+    def _apply_preview_pixmap(self):
+        if not self._preview_pixmap or self._preview_pixmap.isNull():
+            return
+        size=self.preview.contentsRect().size()
+        if size.width() < 2 or size.height() < 2:
+            return
+        pix=self._preview_pixmap.scaled(size,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation)
+        self.preview.setPixmap(pix)
+
+    def _load_preview(self, sid, force=False):
+        sid=str(sid or "").strip()
+        if not sid:
+            self._preview_pixmap=None; self._preview_signature=None
+            self.preview.clear(); self.preview.setText("No session selected"); return
         path=SESSIONS/sid/"preview.png"
-        if path.exists():
-            pix=QPixmap(str(path)); self.preview.setPixmap(pix.scaled(self.preview.size(),Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
-        else: self.preview.setText("No preview yet for this session")
+        if not path.is_file():
+            self._preview_pixmap=None; self._preview_signature=None
+            self.preview.clear(); self.preview.setText("No preview rendered yet for this session"); return
+        try:
+            stat=path.stat(); signature=(stat.st_mtime_ns,stat.st_size)
+            if not force and signature == self._preview_signature and self._preview_pixmap:
+                return
+            data=path.read_bytes()
+            image=QImage()
+            if not image.loadFromData(data):
+                raise ValueError(f"invalid/incomplete preview image ({len(data)} bytes)")
+            self._preview_pixmap=QPixmap.fromImage(image)
+            self._preview_signature=signature
+            self._preview_session_id=sid
+            self.preview.clear(); self._apply_preview_pixmap()
+            self.preview.setToolTip(f"{path} · {image.width()}×{image.height()} · {len(data)} bytes")
+        except Exception as exc:
+            # Keep the previous complete frame on transient read errors instead of blanking it.
+            if self._preview_pixmap:
+                self._apply_preview_pixmap()
+                self.preview.setToolTip(f"Preview refresh delayed: {exc}")
+            else:
+                self.preview.clear(); self.preview.setText(f"Preview load failed: {exc}")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if getattr(self, "_preview_pixmap", None):
+            self._apply_preview_pixmap()
+
+    def _selected_session_id(self):
+        item=self.sessions.currentItem() if hasattr(self,"sessions") else None
+        if item and item.text().strip(): return item.text().strip()
+        if self._studio_job_id:
+            try:
+                from gimp_mcp.server import jobs
+                job=jobs.get(self._studio_job_id)
+                if job.session_id: return job.session_id
+            except Exception: pass
+        return None
+
+    def export_selected_artwork(self, fmt):
+        sid=self._selected_session_id()
+        if not sid:
+            QMessageBox.warning(self,"Export artwork","No artwork session selected."); return
+        ext="jpg" if fmt=="jpg" else fmt
+        filters={"xcf":"GIMP Project (*.xcf)","png":"PNG Image (*.png)","jpg":"JPEG Image (*.jpg *.jpeg)"}
+        default=Path.home()/"Pictures"/f"gimp-mcp-{sid[:8]}.{ext}"
+        target,_=QFileDialog.getSaveFileName(self,f"Export {fmt.upper()}",str(default),filters[fmt])
+        if not target: return
+        try:
+            from gimp_mcp.server import exports, sessions
+            session=sessions.get(sid)
+            result=exports.export(session,target,fmt,overwrite=True)
+            QMessageBox.information(self,"Export complete",f"Saved {fmt.upper()} to:\n{result['output']}")
+        except Exception as exc:
+            QMessageBox.critical(self,"Export failed",str(exc))
 
     def refresh(self):
         pid=self._server_pid(); self.server_status.setText(f"Server: {'RUNNING pid='+str(pid) if pid else 'STOPPED'}")
@@ -438,6 +523,27 @@ class ControlCenter(QMainWindow):
             self.log.setPlainText("\n".join(pretty)); self.log.moveCursor(self.log.textCursor().MoveOperation.End)
         if self.sessions.currentItem(): self._load_preview(self.sessions.currentItem().text())
         self._studio_refresh_job()
+
+    def closeEvent(self, event):
+        # QProcess children can otherwise finish during Qt teardown and call
+        # slots on already-destroyed wrappers. Stop only helper processes we own.
+        for attr in ("_studio_models_process", "_provider_process"):
+            proc=getattr(self,attr,None)
+            if proc is None:
+                continue
+            try:
+                proc.finished.disconnect()
+            except Exception:
+                pass
+            try:
+                if proc.state() != QProcess.ProcessState.NotRunning:
+                    proc.terminate()
+                    if not proc.waitForFinished(1000):
+                        proc.kill(); proc.waitForFinished(1000)
+            except RuntimeError:
+                pass
+            setattr(self,attr,None)
+        super().closeEvent(event)
 
 
 def main():

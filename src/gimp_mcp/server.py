@@ -8,6 +8,7 @@ from mcp.server import MCPServer
 from .bridge import GimpBridge
 from .config import Settings
 from .errors import GimpMcpError
+from .export_service import ExportService
 from .events import EventBus
 from .provider_manager import ProviderManager, ProviderError
 from .operations import GimpOperations
@@ -22,6 +23,7 @@ policy = PathPolicy(settings.allowed_roots)
 bridge = GimpBridge(settings.gimp_executable, settings.timeout)
 sessions = SessionManager(settings.session_root)
 ops = GimpOperations(bridge, sessions)
+exports = ExportService(ops)
 live_bridge = LiveBridge()
 events = EventBus(settings.state_dir / "events.jsonl")
 providers = ProviderManager()
@@ -223,12 +225,26 @@ def export_image(session_id: str, output_path: str, overwrite: bool = False) -> 
     except GimpMcpError as exc: return exc.as_dict()
 
 @mcp.tool()
+def export_artwork(session_id: str, output_path: str, format: Literal['xcf','png','jpg'] = 'png', overwrite: bool = False) -> dict[str, Any]:
+    """Export the current artwork as an editable XCF project, PNG, or JPEG."""
+    try:
+        s=sessions.get(session_id)
+        dst=policy.ensure_parent(str(ExportService.normalize_target(output_path, format)))
+        return _ok(exports.export(s,dst,format,overwrite=overwrite))
+    except GimpMcpError as exc:
+        return exc.as_dict()
+@mcp.tool()
 def preview_render(session_id: str, max_width: int = 1200, max_height: int = 1200) -> dict[str, Any]:
     '''Render a bounded PNG preview of the current artwork for vision review. Returns a gimp-preview resource URI.'''
     try:
-        s=sessions.get(session_id); max_width=max(1,min(max_width,settings.preview_max)); max_height=max(1,min(max_height,settings.preview_max)); out=s.workdir/'preview.png'
+        s=sessions.get(session_id); max_width=max(1,min(max_width,settings.preview_max)); max_height=max(1,min(max_height,settings.preview_max)); out=s.workdir/'preview.png'; tmp=s.workdir/'preview.tmp.png'
         started=time.monotonic(); events.emit('preview.started', session_id=session_id, operation='preview_render', status='running')
-        data=ops.export(s,out,max_width,max_height); data['resource_uri']=f'gimp-preview://{session_id}'; events.emit('preview.ready', session_id=session_id, operation='preview_render', status='ok', duration_ms=round((time.monotonic()-started)*1000,2), details={'path':str(out),'width':data.get('width'),'height':data.get('height')}); return _ok(data)
+        try:
+            data=ops.export(s,tmp,max_width,max_height)
+            tmp.replace(out)
+        finally:
+            tmp.unlink(missing_ok=True)
+        data['output']=str(out); data['resource_uri']=f'gimp-preview://{session_id}'; events.emit('preview.ready', session_id=session_id, operation='preview_render', status='ok', duration_ms=round((time.monotonic()-started)*1000,2), details={'path':str(out),'width':data.get('width'),'height':data.get('height')}); return _ok(data)
     except GimpMcpError as exc: return exc.as_dict()
 
 @mcp.resource('gimp-preview://{session_id}', mime_type='image/png', name='Artwork preview')
