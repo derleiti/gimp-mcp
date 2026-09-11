@@ -9,7 +9,7 @@ from .bridge import GimpBridge
 from .config import Settings
 from .errors import GimpMcpError
 from .events import EventBus
-from .ai_control import AICoderAdapter, AIControlError
+from .provider_manager import ProviderManager, ProviderError
 from .operations import GimpOperations
 from .security import PathPolicy
 from .sessions import SessionManager
@@ -24,7 +24,7 @@ sessions = SessionManager(settings.session_root)
 ops = GimpOperations(bridge, sessions)
 live_bridge = LiveBridge()
 events = EventBus(settings.state_dir / "events.jsonl")
-ai_control = AICoderAdapter()
+providers = ProviderManager()
 jobs = JobManager(settings.state_dir / "jobs")
 
 mcp = MCPServer('GIMP MCP', version='0.4.0', instructions='Structured GIMP 3 artwork editing. Create/open a session first, use semantic tools, render previews to inspect progress, and use filter_list/filter_describe before unfamiliar GEGL effects.')
@@ -73,30 +73,30 @@ def events_recent(limit: int = 100, session_id: str | None = None) -> dict[str, 
 
 @mcp.tool()
 def provider_status() -> dict[str, Any]:
-    """Report optional official-provider account status through the shared AICoder adapter. No credentials are returned."""
+    """Report native official-provider account status. No credentials are returned."""
     try:
-        return _ok(ai_control.providers())
-    except AIControlError as exc:
-        return {'ok': False, 'error': {'code': 'AI_CONTROL_UNAVAILABLE', 'message': str(exc), 'recoverable': True}}
+        return _ok(providers.providers())
+    except ProviderError as exc:
+        return {'ok': False, 'error': {'code': 'PROVIDER_UNAVAILABLE', 'message': str(exc), 'recoverable': True}}
 
 @mcp.tool()
 def provider_models(provider: str) -> dict[str, Any]:
     """List models exposed by an already-linked ChatGPT, Claude, Gemini or Mistral account."""
     try:
-        return _ok(ai_control.models(provider))
+        return _ok(providers.models(provider))
     except Exception as exc:
         return {'ok': False, 'error': {'code': 'PROVIDER_ERROR', 'message': str(exc), 'recoverable': True}}
 
 @mcp.tool()
 def triforce_status() -> dict[str, Any]:
-    """Report the existing AILinux/TriForce login reused from AICoder without exposing its bearer token."""
-    return _ok(ai_control.triforce_status())
+    """Report independently configured AILinux/TriForce status without exposing its bearer token."""
+    return _ok(providers.triforce_status())
 
 @mcp.tool()
 def triforce_models() -> dict[str, Any]:
     """List models available to the currently logged-in AILinux/TriForce account."""
     try:
-        return _ok(ai_control.triforce_models())
+        return _ok(providers.triforce_models())
     except Exception as exc:
         return {'ok': False, 'error': {'code': 'TRIFORCE_ERROR', 'message': str(exc), 'recoverable': True}}
 
@@ -276,7 +276,7 @@ def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prompt_runner() -> PromptRunner:
-    return PromptRunner(jobs, ai_control.chat, _studio_tool_call)
+    return PromptRunner(jobs, providers.chat, _studio_tool_call)
 
 
 @mcp.tool()

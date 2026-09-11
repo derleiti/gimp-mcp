@@ -8,4 +8,4 @@
 6. In **Studio**, select provider, model and `auto`, enter the artwork/edit prompt and press **RUN**.
 7. Watch job state and the live preview. Use **PAUSE**, **STOP**, **UNDO**, **REDO**, a follow-up, or **MAKE IT COOLER** as needed.
 
-`auto` prefers the persistent GIMP bridge and falls back to the crash-isolated batch workflow. Provider credentials remain owned by AICoder/official provider clients; GIMP MCP does not copy OAuth tokens.
+`auto` prefers the persistent GIMP bridge and falls back to the crash-isolated batch workflow. Provider credentials remain owned by the official provider clients; GIMP MCP does not copy OAuth tokens and does not depend on AICoder.

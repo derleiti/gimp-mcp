@@ -48,8 +48,9 @@ class ControlCenter(QMainWindow):
     def _studio_tab(self):
         w=QWidget(); v=QVBoxLayout(w)
         top=QHBoxLayout()
-        self.studio_provider=QComboBox(); self.studio_provider.addItems(["triforce","chatgpt","claude","gemini","mistral"])
-        self.studio_model=QLineEdit(); self.studio_model.setPlaceholderText("model id")
+        self.studio_provider=QComboBox(); self.studio_provider.addItems(["chatgpt","claude","gemini","mistral","triforce"])
+        self.studio_model=QComboBox(); self.studio_model.setEditable(True); self.studio_model.setMinimumWidth(420); self.studio_model.setPlaceholderText("model id")
+        self.studio_provider.currentTextChanged.connect(self.studio_refresh_models)
         self.studio_mode=QComboBox(); self.studio_mode.addItems(["auto","live","batch"])
         top.addWidget(QLabel("Provider")); top.addWidget(self.studio_provider); top.addWidget(QLabel("Model")); top.addWidget(self.studio_model,1); top.addWidget(QLabel("Mode")); top.addWidget(self.studio_mode)
         v.addLayout(top)
@@ -73,9 +74,43 @@ class ControlCenter(QMainWindow):
         self.studio_followup.returnPressed.connect(self.studio_followup_send)
         send=QPushButton("SEND"); send.clicked.connect(self.studio_followup_send)
         fr=QHBoxLayout(); fr.addWidget(QLabel("Quick prompt / follow-up")); fr.addWidget(self.studio_followup,1); fr.addWidget(send); v.addLayout(fr)
-        saved=CONTROL.load(); self.studio_provider.setCurrentText(saved.get("ai_provider","triforce")); self.studio_model.setText(saved.get("ai_model","") or "")
-        self._studio_job_id=None
+        saved=CONTROL.load(); self.studio_provider.setCurrentText(saved.get("ai_provider","chatgpt")); self._studio_job_id=None
+        QTimer.singleShot(150, self.studio_refresh_models)
         return w
+
+    def _select_studio_model(self, wanted):
+        wanted=str(wanted or "")
+        for i in range(self.studio_model.count()):
+            if str(self.studio_model.itemData(i) or "") == wanted or self.studio_model.itemText(i) == wanted:
+                self.studio_model.setCurrentIndex(i); return
+        if wanted:
+            self.studio_model.setEditText(wanted)
+
+    def studio_refresh_models(self, *_args):
+        if not PROJECT_PYTHON.exists(): return
+        provider=self.studio_provider.currentText()
+        proc=QProcess(self); proc.setWorkingDirectory(str(ROOT)); proc.setProgram(str(PROJECT_PYTHON)); proc.setArguments(["-m","gimp_mcp.provider_cli","models",provider])
+        proc.finished.connect(lambda _code,_status,p=proc: self._studio_models_finished(p))
+        self._studio_models_process=proc; proc.start()
+
+    def _studio_models_finished(self, proc):
+        stdout=bytes(proc.readAllStandardOutput()).decode("utf-8","replace")
+        wanted=CONTROL.load().get("ai_model","")
+        current=str(self.studio_model.currentData() or self.studio_model.currentText())
+        self.studio_model.clear()
+        try:
+            rows=json.loads(stdout)
+            for item in rows if isinstance(rows,list) else []:
+                if isinstance(item,dict):
+                    mid=str(item.get("id") or item.get("model") or item.get("name") or "")
+                    label=str(item.get("display") or item.get("displayName") or item.get("name") or mid)
+                    if mid: self.studio_model.addItem(label,mid)
+                else: self.studio_model.addItem(str(item),str(item))
+        except Exception: pass
+        self._select_studio_model(current or wanted)
+        if getattr(self, "_studio_models_process", None) is proc:
+            self._studio_models_process = None
+        proc.deleteLater()
 
     def _studio_refresh_job(self):
         if not self._studio_job_id: return
@@ -92,7 +127,7 @@ class ControlCenter(QMainWindow):
         if not prompt: return
         try:
             from gimp_mcp.server import jobs, _prompt_runner
-            job=jobs.create(prompt,self.studio_provider.currentText(),self.studio_model.text().strip(),self.studio_mode.currentText())
+            job=jobs.create(prompt,self.studio_provider.currentText(),str(self.studio_model.currentData() or self.studio_model.currentText()).strip(),self.studio_mode.currentText())
             self._studio_job_id=job.job_id
             import threading
             threading.Thread(target=lambda: _prompt_runner().run(job),daemon=True).start()
@@ -180,7 +215,7 @@ class ControlCenter(QMainWindow):
 
     def _ai_tab(self):
         w=QWidget(); v=QVBoxLayout(w)
-        v.addWidget(QLabel("Choose an optional AI art director. Provider credentials stay with official clients/AICoder."))
+        v.addWidget(QLabel("Choose an optional AI art director. Provider credentials stay with the official provider clients; GIMP MCP does not depend on AICoder."))
         self.provider=QComboBox(); self.provider.addItems(["triforce","chatgpt","claude","gemini","mistral"])
         self.model=QComboBox(); self.model.setMinimumWidth(420)
         saved=CONTROL.load(); idx=self.provider.findText(saved.get("ai_provider","triforce")); self.provider.setCurrentIndex(max(0,idx))
@@ -302,15 +337,11 @@ class ControlCenter(QMainWindow):
         if not PROJECT_PYTHON.exists():
             self.provider_output.setPlainText("Project environment missing; run Sync project first.")
             return
-        if provider == "triforce":
-            code="from gimp_mcp.ai_control import AICoderAdapter; import json; a=AICoderAdapter(); print(json.dumps({'status':a.triforce_status(),'models':a.triforce_models()}, default=str))"
-        else:
-            code=f"from gimp_mcp.ai_control import AICoderAdapter; import json; a=AICoderAdapter(); print(json.dumps({{'status':[x for x in a.providers() if x.get('provider')=='{provider}'],'models':a.models('{provider}')}}, default=str))"
         self.provider_output.setPlainText(f"Checking {provider}…")
         proc=QProcess(self)
         proc.setWorkingDirectory(str(ROOT))
         proc.setProgram(str(PROJECT_PYTHON))
-        proc.setArguments(["-c",code])
+        proc.setArguments(["-m","gimp_mcp.provider_cli","status",provider])
         proc.finished.connect(lambda _code,_status,p=proc: self._provider_status_finished(p))
         self._provider_process=proc
         proc.start()
@@ -335,13 +366,12 @@ class ControlCenter(QMainWindow):
     def provider_connect(self):
         provider=self.provider.currentText()
         if provider == "triforce":
-            self.provider_output.setPlainText("AILinux/TriForce login is shared with AICoder. Use AICoder login/setup, then refresh here."); return
-        code=f"from gimp_mcp.ai_control import AICoderAdapter; import json; print(json.dumps(AICoderAdapter().connect('{provider}', open_browser=True), default=str))"
+            self.provider_output.setPlainText("TriForce is independent too. Configure GIMP_MCP_TRIFORCE_TOKEN, then refresh here."); return
         if not PROJECT_PYTHON.exists():
             self.provider_output.setPlainText("Project environment missing; run Sync project first.")
             return
-        subprocess.Popen([str(PROJECT_PYTHON),"-c",code],cwd=str(ROOT),start_new_session=True)
-        self.provider_output.setPlainText(f"Started official {provider} login flow. Complete it in the opened browser/terminal.")
+        subprocess.Popen([str(PROJECT_PYTHON),"-m","gimp_mcp.provider_cli","connect",provider],cwd=str(ROOT),start_new_session=True)
+        self.provider_output.setPlainText(f"Started native {provider} login flow in the official client. Complete it, then refresh models/status.")
 
     def _session_changed(self, sid):
         self._load_preview(sid)

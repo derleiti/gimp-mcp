@@ -2,6 +2,14 @@
 
 ## 0.4.0 - 2026-09-11
 
+### Native provider independence
+- Removed the runtime dependency on AICoder for ChatGPT, Claude, Gemini and Mistral account access.
+- Added native official-client status/login/chat routing via Codex CLI, Claude Code, Antigravity and Mistral Vibe.
+- ChatGPT model selection now uses Codex app-server `model/list`, so the picker reflects the signed-in account catalog.
+- Added a dedicated `gimp_mcp.provider_cli` for robust GUI subprocess calls without generated `python -c` snippets.
+- Studio model picker is editable and refreshes per provider.
+- TriForce can be configured independently through `GIMP_MCP_TRIFORCE_TOKEN`.
+
 ### Runtime hardening follow-up
 - Fixed project-Python/uv path inconsistencies in the Control Center launcher and server startup.
 - Provider status checks no longer block the GUI event loop.

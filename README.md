@@ -83,10 +83,10 @@ The Control Center provides:
 
 - **Live** — recovered artwork sessions, operation event stream and automatically refreshed previews.
 - **Server** — start/stop the local Streamable HTTP MCP endpoint.
-- **AI Control** — optional art-director provider/model selection through AICoder's provider-owned account integrations.
+- **AI Control** — optional art-director provider/model selection through native official-client account integrations.
 - **Settings** — preview interval and size settings stored privately under `~/.local/state/gimp-mcp/control.json`.
 
-Provider credentials are deliberately **not copied into GIMP MCP**. ChatGPT/Codex, Claude Code, Mistral Vibe and Google Antigravity remain owners of their OAuth state. Existing AILinux/TriForce authentication and its model catalogue are reused from AICoder when available.
+Provider credentials are deliberately **not copied into GIMP MCP**. ChatGPT/Codex, Claude Code, Mistral Vibe and Google Antigravity remain owners of their OAuth state. ChatGPT/Codex, Claude Code, Mistral Vibe and Google Antigravity are queried directly. AILinux/TriForce can be configured independently with GIMP_MCP_TRIFORCE_TOKEN.
 
 ### AI-client routing rule
 
