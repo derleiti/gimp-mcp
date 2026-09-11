@@ -120,6 +120,10 @@ def _validate_step_arguments(index: int, tool: str, arguments: dict[str, Any]) -
         values = arguments.get("values")
         if action not in {"translate", "rotate", "scale"} or not isinstance(values, list):
             raise PlanError(f"step {index} has invalid transform arguments")
+        expected = {"translate": {2}, "rotate": {1, 3}, "scale": {4}}[action]
+        if len(values) not in expected or any(not isinstance(v, (int, float)) or isinstance(v, bool) for v in values):
+            signatures = "translate=[dx,dy], rotate=[degrees] or [degrees,cx,cy], scale=[x0,y0,x1,y1]"
+            raise PlanError(f"step {index} transform_layer invalid values for {action}; expected {signatures}")
 
 
 def parse_plan(raw: str, *, max_steps: int = 50) -> dict[str, Any]:

@@ -167,6 +167,17 @@ def test_tool_failure_does_not_replay_successful_steps(tmp_path: Path):
     assert tool_names.count("layer_create") == 1
 
 
+def test_parse_plan_rejects_transform_shape_mismatch_before_gimp_execution():
+    bad_scale=json.dumps({"goal":"x","steps":[{"tool":"transform_layer","arguments":{"layer_id":1,"action":"scale","values":[0.95,1.05]},"reason":"resize"}]})
+    with pytest.raises(PlanError, match="invalid values for scale"):
+        parse_plan(bad_scale)
+    bad_translate=json.dumps({"goal":"x","steps":[{"tool":"transform_layer","arguments":{"layer_id":1,"action":"translate","values":[5]},"reason":"move"}]})
+    with pytest.raises(PlanError, match="invalid values for translate"):
+        parse_plan(bad_translate)
+    good_rotate=json.dumps({"goal":"x","steps":[{"tool":"transform_layer","arguments":{"layer_id":1,"action":"rotate","values":[-1]},"reason":"rotate"}]})
+    assert parse_plan(good_rotate)["steps"][0]["arguments"]["values"] == [-1]
+
+
 def test_parse_plan_accepts_shape_create_and_normalizes_filter_aliases():
     shape = json.dumps({"goal":"bear","steps":[{"tool":"shape_create","arguments":{"name":"Head","shape":"ellipse","x":10,"y":10,"width":100,"height":80,"color":"#654321"},"reason":"head"}]})
     parsed = parse_plan(shape)
