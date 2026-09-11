@@ -2,6 +2,15 @@
 
 ## 0.4.0 - 2026-09-11
 
+### Natural-language Studio workflow
+- Made natural-language prompting the primary Studio workflow; JSON plans remain an internal execution detail.
+- Added strict per-tool argument validation and safe GEGL filter validation before execution.
+- Added per-step runtime status (`pending`, `running`, `ok`, `failed`) and visible step errors in Studio.
+- Added semantic `shape_create` for filled ellipse/rectangle layers so subjects can be composed from real shapes instead of full rectangular fills.
+- Planner now prefers shapes for object parts and explicitly avoids pretending flat fills are photorealistic.
+- Verified an end-to-end Brumo bear prompt through Claude -> validated plan -> GIMP shapes -> preview.
+
+
 ### Autonomous runtime debugging and model-tolerance hardening
 - Added `scripts/auto-debug` with persistent JSONL diagnostics for tests, providers, previews, exports, live bridge and MCP transport.
 - Added rotating GUI exception/runtime logging under `~/.local/state/gimp-mcp/gui.log`.

@@ -71,7 +71,7 @@ class ControlCenter(QMainWindow):
         self.studio_mode=QComboBox(); self.studio_mode.addItems(["auto","live","batch"])
         top.addWidget(QLabel("Provider")); top.addWidget(self.studio_provider); top.addWidget(QLabel("Model")); top.addWidget(self.studio_model,1); top.addWidget(QLabel("Mode")); top.addWidget(self.studio_mode)
         v.addLayout(top)
-        self.studio_prompt=QTextEdit(); self.studio_prompt.setPlaceholderText("Describe the artwork or edit you want GIMP to perform... (Ctrl+Enter to run)")
+        self.studio_prompt=QTextEdit(); self.studio_prompt.setPlaceholderText("Describe naturally what you want GIMP to create or change… e.g. ‘Create a cute brown bear named Brumo on a light background.’ (Ctrl+Enter to run)")
         run_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self.studio_prompt)
         run_shortcut.activated.connect(self.studio_run)
         run_shortcut_keypad = QShortcut(QKeySequence("Ctrl+Enter"), self.studio_prompt)
@@ -156,8 +156,16 @@ class ControlCenter(QMainWindow):
         try:
             from gimp_mcp.server import jobs
             job=jobs.get(self._studio_job_id)
-            self.studio_status.setText(f"Job {job.job_id[:8]} · {job.status} · step {job.current_step} · {job.progress:.1f}%")
-            self.studio_plan.setPlainText(json.dumps(job.plan or {"status":job.status,"error":job.error},indent=2,ensure_ascii=False))
+            self.studio_status.setText(f"Job {job.job_id[:8]} · {job.status} · step {job.current_step} · {job.progress:.1f}%" + (f" · {job.error}" if job.error else ""))
+            if job.plan and isinstance(job.plan.get("steps"), list):
+                lines=[f"Goal: {job.plan.get('goal','')}", ""]
+                for i, step in enumerate(job.plan["steps"], 1):
+                    state=str(step.get("status") or "pending").upper()
+                    lines.append(f"[{state}] {i}. {step.get('tool','')} — {step.get('reason','')}")
+                    if step.get("error"): lines.append(f"    ERROR: {step['error']}")
+                self.studio_plan.setPlainText("\n".join(lines))
+            else:
+                self.studio_plan.setPlainText(json.dumps({"status":job.status,"error":job.error},indent=2,ensure_ascii=False))
         except Exception as exc:
             self.studio_status.setText(str(exc))
 

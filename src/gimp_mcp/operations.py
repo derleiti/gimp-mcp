@@ -80,6 +80,23 @@ class GimpOperations:
     def document_info(self, s: ArtworkSession) -> dict[str, Any]:
         return self.bridge.run_json(_load(s.document) + "layers=img.get_layers()\nresult={'width':img.get_width(),'height':img.get_height(),'layer_count':len(layers),'layers':[{'layer_id':int(x.get_tattoo()),'name':x.get_name(),'width':x.get_width(),'height':x.get_height(),'visible':x.get_visible(),'opacity':x.get_opacity()} for x in layers]}\nimg.delete()\n")
 
+    def shape_create(self, s: ArtworkSession, name: str, shape: str, x: float, y: float, width: float, height: float, color: str) -> dict[str, Any]:
+        shape = str(shape).strip().lower()
+        if shape not in {"ellipse", "rectangle"}:
+            raise GimpMcpError("INVALID_ARGUMENT", "shape must be ellipse or rectangle", False)
+        if width <= 0 or height <= 0:
+            raise GimpMcpError("INVALID_ARGUMENT", "shape width/height must be positive", False)
+        color = str(color).strip()
+        if not color or len(color) > 128 or any(ord(ch) < 32 for ch in color):
+            raise GimpMcpError("INVALID_ARGUMENT", "color must be a non-empty CSS/Gegl color string", False)
+        tattoo = random.randint(100000, 2_000_000_000)
+        body = _load(s.document)
+        body += f"name={_q(name)};shape={_q(shape)};x={float(x)};y={float(y)};w={float(width)};h={float(height)};color_text={_q(color)};tattoo={tattoo}\n"
+        body += "layer=Gimp.Layer.new(img,name,img.get_width(),img.get_height(),Gimp.ImageType.RGBA_IMAGE,100.0,Gimp.LayerMode.NORMAL)\nimg.insert_layer(layer,None,0);layer.fill(Gimp.FillType.TRANSPARENT);layer.set_tattoo(tattoo)\n"
+        body += "color=Gegl.Color.new(color_text)\nif color is None: raise RuntimeError('INVALID_COLOR')\nGimp.context_push()\ntry:\n Gimp.context_set_foreground(color)\n if shape=='ellipse': ok=img.select_ellipse(Gimp.ChannelOps.REPLACE,x,y,w,h)\n else: ok=img.select_rectangle(Gimp.ChannelOps.REPLACE,x,y,w,h)\n layer.edit_fill(Gimp.FillType.FOREGROUND)\n Gimp.Selection.none(img)\nfinally:\n Gimp.context_pop()\n"
+        body += _save(s.document) + "result={'layer_id':tattoo,'name':name,'shape':shape,'x':x,'y':y,'width':w,'height':h,'color':color_text}\nimg.delete()\n"
+        return self._mutate(s, body)
+
     def layer_create(self, s: ArtworkSession, name: str, width: int | None, height: int | None, *, opacity: float = 100.0, visible: bool = True, blend_mode: str = "normal") -> dict[str, Any]:
         if not 0 <= float(opacity) <= 100:
             raise GimpMcpError('INVALID_ARGUMENT', 'opacity must be 0..100', False)

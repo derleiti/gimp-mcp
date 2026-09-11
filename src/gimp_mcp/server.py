@@ -161,6 +161,11 @@ def document_save_as(session_id: str, output_xcf: str, overwrite: bool = False) 
     except GimpMcpError as exc: return exc.as_dict()
 
 @mcp.tool()
+def shape_create(session_id: str, name: str, shape: Literal['ellipse','rectangle'], x: float, y: float, width: float, height: float, color: str) -> dict[str, Any]:
+    """Create a filled ellipse or rectangle on its own transparent full-canvas layer."""
+    return _call(ops.shape_create, sessions.get(session_id), name, shape, x, y, width, height, color)
+
+@mcp.tool()
 def layer_create(session_id: str, name: str = 'Layer', width: int | None = None, height: int | None = None, opacity: float = 100.0, visible: bool = True, blend_mode: str = 'normal') -> dict[str, Any]:
     '''Create a transparent layer. Width/height default to canvas dimensions. opacity is 0..100; blend_mode accepts normal/multiply/screen/overlay and other valid GIMP LayerMode names. Returns a persistent layer_id.'''
     return _call(ops.layer_create, sessions.get(session_id), name, width, height, opacity=opacity, visible=visible, blend_mode=blend_mode)
@@ -271,6 +276,7 @@ def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         "session_create": session_create,
         "session_info": session_info,
         "layer_create": layer_create,
+        "shape_create": shape_create,
         "layer_delete": layer_delete,
         "layer_update": layer_update,
         "layer_reorder": layer_reorder,

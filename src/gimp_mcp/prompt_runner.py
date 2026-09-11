@@ -8,7 +8,7 @@ from typing import Any, Callable
 from .jobs import ArtworkJob, JobManager
 
 ALLOWED_TOOLS = {
-    "layer_create", "layer_delete", "layer_update", "layer_reorder",
+    "layer_create", "shape_create", "layer_delete", "layer_update", "layer_reorder",
     "selection_set", "text_create", "transform_layer", "layer_fill", "filter_apply",
     "preview_render",
 }
@@ -24,16 +24,66 @@ For the initial/background layer use "$background_layer_id" when available.
 Never invent numeric layer IDs.
 Tool argument guide:
 - layer_create: name, optional width, height, opacity (0..100), visible, blend_mode.
+- shape_create: name, shape (ellipse or rectangle), x, y, width, height, color. Prefer this for visible object parts such as heads, bodies, ears, eyes, badges and simple silhouettes.
 - layer_fill: layer_id, color.
 - layer_update: layer_id, optional name, visible, opacity.
 - text_create: text, x, y, optional size, font_name.
 - transform_layer: layer_id, action, values; prefer translate values=[dx,dy], rotate=[degrees], scale=[x0,y0,x1,y1]. Semantic objects are also accepted.
 - filter_apply: layer_id, operation, parameters, optional name.
-Do not add undocumented arguments.""" % ", ".join(sorted(ALLOWED_TOOLS))
+Do not add undocumented arguments.
+This is a NATURAL LANGUAGE art workflow: the user describes the desired image/edit; you translate it into the safest executable plan.
+Prefer a small number of deterministic steps over speculative effects.
+A full-layer fill does NOT create an object silhouette. Use shape_create for geometric subject parts. If the requested subject cannot be represented photorealistically with the available semantic tools, create an honest stylized composition and say so in the goal; never pretend that flat fills are realistic painting.
+For filters, use canonical GEGL names from this safe registry only: gegl:gaussian-blur, gegl:brightness-contrast, gegl:unsharp-mask, gegl:color-temperature, gegl:shadows-highlights. Never invent aliases like noise or gaussian_blur.
+Use preview_render explicitly after meaningful visual milestones; the host may also add previews automatically.
+Return only JSON.""" % ", ".join(sorted(ALLOWED_TOOLS))
 
 
 class PlanError(ValueError):
     pass
+
+
+_TOOL_ALLOWED_ARGS = {
+    "layer_create": {"name", "width", "height", "opacity", "visible", "blend_mode"},
+    "shape_create": {"name", "shape", "x", "y", "width", "height", "color"},
+    "layer_delete": {"layer_id"},
+    "layer_update": {"layer_id", "name", "visible", "opacity"},
+    "layer_reorder": {"layer_id", "position"},
+    "layer_fill": {"layer_id", "color"},
+    "selection_set": {"action", "x", "y", "width", "height"},
+    "text_create": {"text", "x", "y", "size", "font_name"},
+    "transform_layer": {"layer_id", "action", "values"},
+    "filter_apply": {"layer_id", "operation", "parameters", "name"},
+    "preview_render": {"max_width", "max_height"},
+}
+_SAFE_FILTERS = {
+    "gegl:gaussian-blur",
+    "gegl:brightness-contrast",
+    "gegl:unsharp-mask",
+    "gegl:color-temperature",
+    "gegl:shadows-highlights",
+}
+
+
+def _validate_step_arguments(index: int, tool: str, arguments: dict[str, Any]) -> None:
+    allowed = _TOOL_ALLOWED_ARGS.get(tool, set())
+    unknown = sorted(set(arguments) - allowed)
+    if unknown:
+        raise PlanError(f"step {index} {tool} has unsupported arguments: {', '.join(unknown)}")
+    if tool == "filter_apply":
+        operation = str(arguments.get("operation") or "").strip()
+        if operation not in _SAFE_FILTERS:
+            raise PlanError(f"step {index} uses unsupported filter operation: {operation or '<empty>'}")
+        if not isinstance(arguments.get("parameters", {}), dict):
+            raise PlanError(f"step {index} filter parameters must be an object")
+    if tool in {"layer_delete", "layer_update", "layer_reorder", "layer_fill", "transform_layer", "filter_apply"}:
+        if "layer_id" not in arguments:
+            raise PlanError(f"step {index} {tool} requires layer_id")
+    if tool == "transform_layer":
+        action = str(arguments.get("action") or "")
+        values = arguments.get("values")
+        if action not in {"translate", "rotate", "scale"} or not isinstance(values, list):
+            raise PlanError(f"step {index} has invalid transform arguments")
 
 
 def parse_plan(raw: str) -> dict[str, Any]:
@@ -63,6 +113,7 @@ def parse_plan(raw: str) -> dict[str, Any]:
             raise PlanError(f"step {index + 1} arguments must be an object")
         if any(k in arguments for k in ("python", "code", "shell", "command")):
             raise PlanError(f"step {index + 1} contains forbidden executable arguments")
+        _validate_step_arguments(index + 1, tool, arguments)
         cleaned.append({"tool": tool, "arguments": arguments, "reason": str(step.get("reason") or "")})
     if len(cleaned) > 30:
         raise PlanError("plan exceeds 30 steps")
@@ -106,14 +157,21 @@ class PromptRunner:
         refs = dict(refs or {})
         for index, step in enumerate(steps, 1):
             self.jobs.checkpoint(job.job_id)
-            self.jobs.update(job, status="running", current_step=index, progress=round((index - 1) / total * 100, 1))
+            step["status"] = "running"
+            step.pop("error", None)
+            self.jobs.update(job, status="running", current_step=index, progress=round((index - 1) / total * 100, 1), plan=plan)
             args = _resolve_refs(dict(step["arguments"]), refs)
             args["__job_mode"] = job.mode
             if job.session_id and "session_id" not in args:
                 args["session_id"] = job.session_id
             result = self.tool_call(step["tool"], args)
             if not isinstance(result, dict) or result.get("ok") is False:
-                raise RuntimeError(f"{step['tool']} failed: {result}")
+                step["status"] = "failed"
+                step["error"] = str(result)
+                self.jobs.update(job, plan=plan)
+                raise RuntimeError(f"step {index} {step['tool']} failed: {result}")
+            step["status"] = "ok"
+            self.jobs.update(job, plan=plan)
             data = _result_data(result)
             if data.get("layer_id") is not None:
                 refs["last_layer_id"] = data["layer_id"]
