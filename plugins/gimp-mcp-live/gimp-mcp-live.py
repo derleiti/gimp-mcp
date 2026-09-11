@@ -126,6 +126,9 @@ class GimpMcpLive(Gimp.PlugIn):
             return {'ok': True, 'mode': 'persistent', 'gimp_version': str(Gimp.version()), 'socket': str(SOCKET_PATH)}
         if command == 'active_info':
             image = self._image
+            if image is not None and not image.is_valid():
+                self._image = None
+                image = None
             return {
                 'ok': True,
                 'image': None if image is None else {
@@ -135,6 +138,9 @@ class GimpMcpLive(Gimp.PlugIn):
             }
         if command in {'layer_update', 'translate', 'undo'}:
             image = self._image
+            if image is not None and not image.is_valid():
+                self._image = None
+                image = None
             if image is None:
                 raise RuntimeError('no live image is open')
             raw = str(payload.get('path') or '')
@@ -178,10 +184,13 @@ class GimpMcpLive(Gimp.PlugIn):
             if new_image is None:
                 raise RuntimeError('GIMP could not load document')
             old_image = self._image
-            if old_image is not None:
+            if old_image is not None and old_image.is_valid():
                 try:
                     Gimp.displays_reconnect(old_image, new_image)
-                    old_image.delete()
+                    # displays_reconnect() may invalidate the old image immediately.
+                    # Never call gimp-image-delete with a stale image ID.
+                    if old_image.is_valid():
+                        old_image.delete()
                 except Exception:
                     Gimp.Display.new(new_image)
             else:
