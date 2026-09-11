@@ -63,7 +63,7 @@ class GimpOperations:
                 self.sessions.rollback_failed(s, snap)
                 raise
 
-    def document_create(self, s: ArtworkSession, width: int, height: int, name: str) -> dict[str, Any]:
+    def document_create(self, s: ArtworkSession, width: int, height: int, name: str, background_color: str | None = None) -> dict[str, Any]:
         if not (1 <= width <= 20000 and 1 <= height <= 20000):
             raise GimpMcpError('INVALID_ARGUMENT', 'width and height must be within 1..20000', False)
         tattoo = random.randint(100000, 2_000_000_000)
@@ -72,6 +72,7 @@ class GimpOperations:
             "img=Gimp.Image.new(w,h,Gimp.ImageBaseType.RGB)\n"
             "layer=Gimp.Layer.new(img,name,w,h,Gimp.ImageType.RGBA_IMAGE,100.0,Gimp.LayerMode.NORMAL)\n"
             "img.insert_layer(layer,None,0);layer.fill(Gimp.FillType.TRANSPARENT);layer.set_tattoo(tattoo)\n"
+            + (f"color=Gegl.Color.new({_q(background_color)});Gimp.context_push();Gimp.context_set_foreground(color);layer.edit_fill(Gimp.FillType.FOREGROUND);Gimp.context_pop()\n" if background_color else "")
             + _save(s.document)
             + "result={'width':w,'height':h,'layer_id':tattoo,'layer_name':name}\nimg.delete()\n")
         self._mirror(s)

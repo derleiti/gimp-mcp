@@ -17,6 +17,7 @@ from .sessions import SessionManager
 from .live_bridge import LiveBridge
 from .jobs import JobManager
 from .prompt_runner import PromptRunner
+from .studio_mcp_client import StudioMcpClient
 
 settings = Settings()
 policy = PathPolicy(settings.allowed_roots)
@@ -103,10 +104,10 @@ def triforce_models() -> dict[str, Any]:
         return {'ok': False, 'error': {'code': 'TRIFORCE_ERROR', 'message': str(exc), 'recoverable': True}}
 
 @mcp.tool()
-def session_create(width: int = 1024, height: int = 768, background_name: str = 'Background') -> dict[str, Any]:
+def session_create(width: int = 1024, height: int = 768, background_name: str = 'Background', background_color: str | None = None) -> dict[str, Any]:
     '''Create a new isolated artwork session and XCF working document. Returns a session_id used by all editing tools.'''
     s = sessions.create()
-    result = _call(ops.document_create, s, width, height, background_name)
+    result = _call(ops.document_create, s, width, height, background_name, background_color)
     if result.get('ok'): result['data']['session_id'] = s.session_id
     return result
 
@@ -300,6 +301,10 @@ def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 def _prompt_runner() -> PromptRunner:
     return PromptRunner(jobs, providers.chat, _studio_tool_call)
 
+def _mcp_prompt_runner(endpoint: str = "http://127.0.0.1:8000/mcp") -> PromptRunner:
+    client = StudioMcpClient(endpoint)
+    return PromptRunner(jobs, providers.chat, client.call_tool)
+
 
 @mcp.tool()
 def artwork_job_create(prompt: str, provider: str = "triforce", model: str = "", mode: Literal["auto", "live", "batch"] = "auto", session_id: str | None = None) -> dict[str, Any]:
@@ -331,7 +336,7 @@ def artwork_job_run(job_id: str) -> dict[str, Any]:
     """Run a queued/paused artwork job through the selected AI provider and semantic GIMP tools."""
     try:
         job = jobs.get(job_id)
-        result = _prompt_runner().run(job)
+        result = _mcp_prompt_runner().run(job)
         return _ok(asdict(result)) if result.status == "completed" else {"ok": False, "data": asdict(result), "error": {"code": "JOB_FAILED", "message": result.error or result.status, "recoverable": result.status != "cancelled"}}
     except KeyError:
         return {"ok": False, "error": {"code": "JOB_NOT_FOUND", "message": f"Unknown job: {job_id}", "recoverable": False}}
@@ -368,7 +373,7 @@ def artwork_job_cancel(job_id: str) -> dict[str, Any]:
 def artwork_followup(job_id: str, prompt: str) -> dict[str, Any]:
     """Apply a follow-up art direction to the existing session and preserve undo history."""
     try:
-        result = _prompt_runner().followup(jobs.get(job_id), prompt)
+        result = _mcp_prompt_runner().followup(jobs.get(job_id), prompt)
         return _ok(asdict(result)) if result.status == "completed" else {"ok": False, "data": asdict(result), "error": {"code": "JOB_FAILED", "message": result.error or result.status, "recoverable": True}}
     except KeyError:
         return {"ok": False, "error": {"code": "JOB_NOT_FOUND", "message": f"Unknown job: {job_id}", "recoverable": False}}
@@ -378,7 +383,7 @@ def artwork_followup(job_id: str, prompt: str) -> dict[str, Any]:
 def artwork_make_it_cooler(job_id: str, preset: str = "Make it cooler") -> dict[str, Any]:
     """Ask the selected model for a few targeted improvements and execute them through safe semantic GIMP actions."""
     try:
-        result = _prompt_runner().make_it_cooler(jobs.get(job_id), preset)
+        result = _mcp_prompt_runner().make_it_cooler(jobs.get(job_id), preset)
         return _ok(asdict(result)) if result.status == "completed" else {"ok": False, "data": asdict(result), "error": {"code": "JOB_FAILED", "message": result.error or result.status, "recoverable": True}}
     except KeyError:
         return {"ok": False, "error": {"code": "JOB_NOT_FOUND", "message": f"Unknown job: {job_id}", "recoverable": False}}

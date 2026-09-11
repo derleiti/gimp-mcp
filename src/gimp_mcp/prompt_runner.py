@@ -138,6 +138,14 @@ def _result_data(result: dict[str, Any]) -> dict[str, Any]:
     return data if isinstance(data, dict) else (result if isinstance(result, dict) else {})
 
 
+def transparent_background_requested(prompt: str) -> bool:
+    text = (prompt or "").lower()
+    return any(token in text for token in (
+        "transparent background", "transparent canvas", "transparency",
+        "alpha background", "no background",
+    ))
+
+
 class PromptRunner:
     def __init__(self, jobs: JobManager, ai_chat: Callable[..., str], tool_call: Callable[[str, dict[str, Any]], dict[str, Any]], *, preview_every: int = 2, repair_attempts: int = 2) -> None:
         self.jobs = jobs
@@ -193,7 +201,10 @@ class PromptRunner:
         try:
             refs: dict[str, Any] = {}
             if not job.session_id:
-                created = self.tool_call("session_create", {"__job_mode": job.mode})
+                create_args: dict[str, Any] = {"__job_mode": job.mode}
+                if not transparent_background_requested(job.prompt):
+                    create_args["background_color"] = "#F5F3EE"
+                created = self.tool_call("session_create", create_args)
                 if not isinstance(created, dict) or not created.get("ok"):
                     raise RuntimeError(f"session_create failed: {created}")
                 created_data = _result_data(created)

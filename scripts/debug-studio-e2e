@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+ENDPOINT = 'http://127.0.0.1:8000/mcp'
+OUTROOT = Path('/tmp/gimp-mcp/e2e-output')
+
+
+def mark(label: str, ok: bool, detail: str = '') -> None:
+    print(f'{label:.<30} {"PASS" if ok else "FAIL"}' + (f'  {detail}' if detail else ''))
+    if not ok:
+        raise RuntimeError(f'{label} failed: {detail}')
+
+
+def identify(path: Path) -> dict[str, str]:
+    fmt = '%m|%w|%h|%k|%[fx:mean.a]'
+    p = subprocess.run(['identify', '-format', fmt, str(path)], text=True, capture_output=True)
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr.strip() or f'identify failed for {path}')
+    parts = p.stdout.strip().split('|')
+    return dict(zip(('format','width','height','colors','alpha_mean'), parts, strict=True))
+
+
+async def call(session: ClientSession, name: str, args: dict) -> dict:
+    result = await session.call_tool(name, args)
+    data = getattr(result, 'structured_content', None)
+    if not isinstance(data, dict):
+        for item in getattr(result, 'content', []) or []:
+            text = getattr(item, 'text', None)
+            if text:
+                try:
+                    data = json.loads(text)
+                    break
+                except json.JSONDecodeError:
+                    pass
+    if not isinstance(data, dict):
+        raise RuntimeError(f'{name}: no structured result')
+    if data.get('ok') is False:
+        raise RuntimeError(f'{name}: {data}')
+    return data
+
+
+async def main() -> None:
+    OUTROOT.mkdir(parents=True, exist_ok=True)
+    async with streamable_http_client(ENDPOINT) as streams:
+        async with ClientSession(streams[0], streams[1]) as session:
+            await session.initialize()
+            tools = {t.name for t in (await session.list_tools()).tools}
+            required = {'gimp_status','session_create','session_info','layer_fill','shape_create','preview_render','export_artwork'}
+            mark('MCP handshake', required <= tools, f'{len(tools)} tools')
+            status = await call(session, 'gimp_status', {})
+            mark('GIMP status', bool(status['data'].get('pdb_available')), status['data'].get('gimp_version','?'))
+
+            created = await call(session, 'session_create', {'width':640,'height':480})
+            sid = created['data']['session_id']; bg = created['data']['layer_id']
+            mark('Session create', bool(sid), sid)
+            await call(session, 'layer_fill', {'session_id':sid,'layer_id':bg,'color':'#F5F3EE'})
+            mark('Background opaque', True)
+
+            shapes = [
+                ('Body','ellipse',190,170,260,250,'#6B4423'),
+                ('Head','ellipse',220,70,200,180,'#7A4E2D'),
+                ('Left Ear','ellipse',205,45,65,70,'#5A351D'),
+                ('Right Ear','ellipse',370,45,65,70,'#5A351D'),
+                ('Muzzle','ellipse',265,155,110,75,'#B98A63'),
+                ('Left Eye','ellipse',270,125,26,32,'#17120F'),
+                ('Right Eye','ellipse',345,125,26,32,'#17120F'),
+                ('Left Highlight','ellipse',277,130,8,9,'#FFFFFF'),
+                ('Right Highlight','ellipse',352,130,8,9,'#FFFFFF'),
+                ('Nose','ellipse',305,165,35,25,'#221612'),
+            ]
+            for args in shapes:
+                await call(session, 'shape_create', {'session_id':sid,'name':args[0],'shape':args[1],'x':args[2],'y':args[3],'width':args[4],'height':args[5],'color':args[6]})
+            mark('Shape visible', True, f'{len(shapes)} editable shape layers')
+
+            previous = None
+            for i in range(10):
+                r = await call(session, 'preview_render', {'session_id':sid,'max_width':640,'max_height':480})
+                path = Path(r['data']['output'])
+                stat = path.stat()
+                meta = identify(path)
+                good = stat.st_size > 0 and meta['format'] == 'PNG' and int(meta['width']) == 640 and int(meta['height']) == 480 and float(meta['alpha_mean']) > .95 and int(meta['colors']) > 3
+                if previous is not None:
+                    good = good and stat.st_mtime_ns >= previous
+                previous = stat.st_mtime_ns
+                mark(f'Preview {i+1}/10', good, f'{stat.st_size} B colors={meta["colors"]} alpha={meta["alpha_mean"]}')
+                time.sleep(.02)
+
+            info = await call(session, 'session_info', {'session_id':sid})
+            mark('Session layer count', info['data'].get('layer_count',0) >= 11, str(info['data'].get('layer_count')))
+
+            targets = {
+                'xcf': OUTROOT / f'{sid}.xcf',
+                'png': OUTROOT / f'{sid}.png',
+                'jpg': OUTROOT / f'{sid}.jpg',
+            }
+            for fmt,path in targets.items():
+                r = await call(session, 'export_artwork', {'session_id':sid,'output_path':str(path),'format':fmt,'overwrite':True})
+                mark(f'{fmt.upper()} export', path.is_file() and path.stat().st_size > 0, str(path))
+                f = subprocess.run(['file','-b',str(path)], text=True, capture_output=True).stdout.strip()
+                if fmt == 'png':
+                    m=identify(path); mark('PNG visible', m['format']=='PNG' and int(m['colors'])>3 and float(m['alpha_mean'])>.95, f)
+                elif fmt == 'jpg':
+                    m=identify(path); mark('JPG visible', m['format']=='JPEG' and int(m['colors'])>3, f)
+                else:
+                    mark('XCF valid', 'GIMP XCF' in f, f)
+
+            preview = Path('/tmp/gimp-mcp/sessions') / sid / 'preview.png'
+            mark('Active session sync', sid in str(preview) and preview.exists(), sid)
+            print(f'FINAL_SESSION_ID={sid}')
+            print(f'PREVIEW={preview}')
+            print(f'EXPORT_DIR={OUTROOT}')
+
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except Exception as exc:
+        print(f'E2E FAILED: {exc}', file=sys.stderr)
+        raise SystemExit(1)

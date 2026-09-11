@@ -16,7 +16,7 @@ from gimp_mcp.live_bridge import LiveBridge
 from gimp_mcp.setup_manager import SetupManager
 
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSpinBox, QTabWidget,
     QTextEdit, QVBoxLayout, QWidget
 )
@@ -40,6 +40,11 @@ def _configure_gui_logging() -> logging.Logger:
         logger.addHandler(handler)
         logger.propagate=False
     return logger
+
+def _prefer_active_session(active_session_id: str | None, selected_session_id: str | None) -> str | None:
+    active = str(active_session_id or "").strip()
+    selected = str(selected_session_id or "").strip()
+    return active or selected or None
 
 GUI_LOGGER = _configure_gui_logging()
 
@@ -173,11 +178,13 @@ class ControlCenter(QMainWindow):
         prompt=self.studio_prompt.toPlainText().strip()
         if not prompt: return
         try:
-            from gimp_mcp.server import jobs, _prompt_runner
+            from gimp_mcp.server import jobs, _mcp_prompt_runner
+            if not self._server_pid():
+                self.start_server()
             job=jobs.create(prompt,self.studio_provider.currentText(),str(self.studio_model.currentData() or self.studio_model.currentText()).strip(),self.studio_mode.currentText())
             self._studio_job_id=job.job_id
             import threading
-            threading.Thread(target=lambda: _prompt_runner().run(job),daemon=True).start()
+            threading.Thread(target=lambda: _mcp_prompt_runner().run(job),daemon=True).start()
             self._studio_refresh_job()
         except Exception as exc: self.studio_status.setText(f"Run failed: {exc}")
 
@@ -219,21 +226,21 @@ class ControlCenter(QMainWindow):
             self.studio_run()
             return
         try:
-            from gimp_mcp.server import jobs, _prompt_runner
+            from gimp_mcp.server import jobs, _mcp_prompt_runner
             job=jobs.get(self._studio_job_id)
         except Exception as exc:
             self.studio_status.setText(f"Follow-up failed: {exc}")
             return
         import threading
-        threading.Thread(target=lambda: _prompt_runner().followup(job,text),daemon=True).start()
+        threading.Thread(target=lambda: _mcp_prompt_runner().followup(job,text),daemon=True).start()
         self.studio_status.setText(f"Follow-up queued for job {job.job_id[:8]}…")
 
     def studio_cooler(self):
         if not self._studio_job_id: return
-        from gimp_mcp.server import jobs, _prompt_runner
+        from gimp_mcp.server import jobs, _mcp_prompt_runner
         job=jobs.get(self._studio_job_id)
         import threading
-        threading.Thread(target=lambda: _prompt_runner().make_it_cooler(job),daemon=True).start()
+        threading.Thread(target=lambda: _mcp_prompt_runner().make_it_cooler(job),daemon=True).start()
 
     def _live_tab(self):
         w=QWidget(); outer=QHBoxLayout(w)
@@ -241,7 +248,10 @@ class ControlCenter(QMainWindow):
         self.sessions=QListWidget(); self.sessions.currentTextChanged.connect(self._session_changed)
         self.log=QTextEdit(); self.log.setReadOnly(True)
         self.live_bridge_label=QLabel('GIMP Live Bridge: checking...')
-        left.addWidget(self.live_bridge_label); left.addWidget(QLabel("Artwork sessions")); left.addWidget(self.sessions,1); left.addWidget(QLabel("Live operations")); left.addWidget(self.log,2)
+        self.follow_active_session=QCheckBox("Follow active Studio job")
+        self.follow_active_session.setChecked(True)
+        self.sessions.itemClicked.connect(lambda _item: self.follow_active_session.setChecked(False))
+        left.addWidget(self.live_bridge_label); left.addWidget(self.follow_active_session); left.addWidget(QLabel("Artwork sessions")); left.addWidget(self.sessions,1); left.addWidget(QLabel("Live operations")); left.addWidget(self.log,2)
         self.preview=QLabel("No preview yet")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumSize(520,420)
@@ -250,6 +260,8 @@ class ControlCenter(QMainWindow):
         self._preview_pixmap=None
         self._preview_signature=None
         self._preview_session_id=None
+        self.preview_meta=QLabel("Session: - · Preview: -")
+        self.preview_meta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         export_row=QHBoxLayout()
         export_xcf=QPushButton("EXPORT XCF"); export_png=QPushButton("EXPORT PNG"); export_jpg=QPushButton("EXPORT JPG")
         export_xcf.clicked.connect(lambda: self.export_selected_artwork("xcf"))
@@ -257,7 +269,7 @@ class ControlCenter(QMainWindow):
         export_jpg.clicked.connect(lambda: self.export_selected_artwork("jpg"))
         for b in (export_xcf,export_png,export_jpg): export_row.addWidget(b)
         export_row.addStretch()
-        right.addWidget(QLabel("Live preview")); right.addWidget(self.preview,1); right.addLayout(export_row)
+        right.addWidget(QLabel("Live preview")); right.addWidget(self.preview,1); right.addWidget(self.preview_meta); right.addLayout(export_row)
         outer.addLayout(left,1); outer.addLayout(right,2); return w
 
     def _server_tab(self):
@@ -484,6 +496,8 @@ class ControlCenter(QMainWindow):
             self._preview_signature=signature
             self._preview_session_id=sid
             self.preview.clear(); self._apply_preview_pixmap()
+            updated=time.strftime("%H:%M:%S", time.localtime(stat.st_mtime))
+            self.preview_meta.setText(f"Session: {sid[:8]}… · Preview: {image.width()}×{image.height()} · Updated: {updated} · Size: {len(data) // 1024 or 1} KB")
             self.preview.setToolTip(f"{path} · {image.width()}×{image.height()} · {len(data)} bytes")
         except Exception as exc:
             # Keep the previous complete frame on transient read errors instead of blanking it.
@@ -499,15 +513,16 @@ class ControlCenter(QMainWindow):
             self._apply_preview_pixmap()
 
     def _selected_session_id(self):
-        item=self.sessions.currentItem() if hasattr(self,"sessions") else None
-        if item and item.text().strip(): return item.text().strip()
+        active_sid=None
         if self._studio_job_id:
             try:
                 from gimp_mcp.server import jobs
-                job=jobs.get(self._studio_job_id)
-                if job.session_id: return job.session_id
-            except Exception: pass
-        return None
+                active_sid=jobs.get(self._studio_job_id).session_id
+            except Exception:
+                pass
+        item=self.sessions.currentItem() if hasattr(self,"sessions") else None
+        selected=item.text().strip() if item and item.text().strip() else None
+        return _prefer_active_session(active_sid, selected)
 
     def export_selected_artwork(self, fmt):
         sid=self._selected_session_id()
@@ -543,6 +558,16 @@ class ControlCenter(QMainWindow):
             self.sessions.clear(); self.sessions.addItems(ids)
             if current in ids: self.sessions.setCurrentRow(ids.index(current))
             elif ids: self.sessions.setCurrentRow(len(ids)-1)
+        if getattr(self, "follow_active_session", None) and self.follow_active_session.isChecked() and self._studio_job_id:
+            try:
+                from gimp_mcp.server import jobs
+                active_sid=jobs.get(self._studio_job_id).session_id
+                if active_sid in ids:
+                    wanted=ids.index(active_sid)
+                    if self.sessions.currentRow() != wanted:
+                        self.sessions.setCurrentRow(wanted)
+            except Exception:
+                pass
         if EVENTS.exists():
             lines=EVENTS.read_text(encoding="utf-8",errors="replace").splitlines()[-80:]
             pretty=[]
