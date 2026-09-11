@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import time
 import urllib.error
 import urllib.request
@@ -68,6 +69,22 @@ class ProviderManager:
         ):
             env.pop(key, None)
         return env
+
+    @staticmethod
+    def _codex_mcp_disable_args() -> list[str]:
+        """Disable user-configured MCP servers without discarding Codex account/model config."""
+        config = Path(os.getenv("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
+        try:
+            data = tomllib.loads(config.read_text(encoding="utf-8"))
+            servers = data.get("mcp_servers") or {}
+        except Exception:
+            servers = {}
+        args: list[str] = []
+        if isinstance(servers, dict):
+            for name, value in servers.items():
+                if isinstance(value, dict):
+                    args.extend(["-c", f"mcp_servers.{name}.enabled=false"])
+        return args
 
     def _run(self, argv: list[str], *, timeout: int | None = None, cwd: str | None = None,
              env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -242,8 +259,19 @@ class ProviderManager:
 
     @staticmethod
     def _strip_account_model(provider: str, model: str) -> str:
-        prefix = f"account:{provider}/"
-        return model[len(prefix):] if model.startswith(prefix) else model
+        provider = provider.lower().strip()
+        model = str(model or "").strip()
+        if model.startswith("account:"):
+            prefix, sep, inner = model.partition("/")
+            model_provider = prefix.removeprefix("account:").lower().strip()
+            if not sep or not inner:
+                raise ProviderError(f"Invalid account model id: {model}")
+            if model_provider != provider:
+                raise ProviderError(
+                    f"Provider/model mismatch: provider={provider}, model belongs to {model_provider}: {model}"
+                )
+            return inner
+        return model
 
     def chat(self, provider: str, model: str, message: str, system_prompt: str) -> str:
         provider = provider.lower().strip()
@@ -260,7 +288,8 @@ class ProviderManager:
             with tempfile.TemporaryDirectory(prefix="gimp-mcp-codex-") as tmp:
                 out = Path(tmp) / "answer.txt"
                 r = self._run([exe, "exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only",
-                               "-c", "approval_policy=\"never\"", "-m", model, "-C", tmp, "-o", str(out), transcript],
+                               "-c", "approval_policy=\"never\"", *self._codex_mcp_disable_args(),
+                               "-m", model, "-C", tmp, "-o", str(out), transcript],
                               timeout=self.timeout, cwd=tmp)
                 if r.returncode != 0:
                     raise ProviderError((r.stderr or r.stdout).strip()[-1000:] or "Codex request failed")
@@ -272,7 +301,7 @@ class ProviderManager:
             with tempfile.TemporaryDirectory(prefix="gimp-mcp-claude-") as tmp:
                 r = self._run([exe, "--print", "--output-format", "text", "--model", model,
                                "--tools", "", "--disallowed-tools", "*", "--disable-slash-commands",
-                               "--no-session-persistence", "--no-chrome", "--system-prompt", system_prompt,
+                               "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--no-session-persistence", "--no-chrome", "--system-prompt", system_prompt,
                                message], timeout=self.timeout, cwd=tmp, env=env)
                 if r.returncode != 0:
                     raise ProviderError((r.stderr or r.stdout).strip()[-1000:] or "Claude request failed")

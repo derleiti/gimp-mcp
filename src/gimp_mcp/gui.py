@@ -89,14 +89,29 @@ class ControlCenter(QMainWindow):
     def studio_refresh_models(self, *_args):
         if not PROJECT_PYTHON.exists(): return
         provider=self.studio_provider.currentText()
-        proc=QProcess(self); proc.setWorkingDirectory(str(ROOT)); proc.setProgram(str(PROJECT_PYTHON)); proc.setArguments(["-m","gimp_mcp.provider_cli","models",provider])
+        # Clear immediately so a previous provider model cannot be submitted
+        # while the asynchronous catalogue refresh is still running.
+        self.studio_model.clear()
+        self.studio_model.clearEditText()
+        proc=QProcess(self); proc.setProperty("provider", provider)
+        proc.setWorkingDirectory(str(ROOT)); proc.setProgram(str(PROJECT_PYTHON)); proc.setArguments(["-m","gimp_mcp.provider_cli","models",provider])
         proc.finished.connect(lambda _code,_status,p=proc: self._studio_models_finished(p))
         self._studio_models_process=proc; proc.start()
 
+    @staticmethod
+    def _model_matches_provider(provider, model):
+        model=str(model or "").strip()
+        return not model.startswith("account:") or model.startswith(f"account:{provider}/")
+
     def _studio_models_finished(self, proc):
+        provider=str(proc.property("provider") or "")
         stdout=bytes(proc.readAllStandardOutput()).decode("utf-8","replace")
+        if provider != self.studio_provider.currentText():
+            proc.deleteLater(); return
         wanted=CONTROL.load().get("ai_model","")
         current=str(self.studio_model.currentData() or self.studio_model.currentText())
+        if not self._model_matches_provider(provider, current): current=""
+        if not self._model_matches_provider(provider, wanted): wanted=""
         self.studio_model.clear()
         try:
             rows=json.loads(stdout)
@@ -107,7 +122,11 @@ class ControlCenter(QMainWindow):
                     if mid: self.studio_model.addItem(label,mid)
                 else: self.studio_model.addItem(str(item),str(item))
         except Exception: pass
-        self._select_studio_model(current or wanted)
+        preferred=current or wanted
+        if preferred:
+            self._select_studio_model(preferred)
+        elif self.studio_model.count():
+            self.studio_model.setCurrentIndex(0)
         if getattr(self, "_studio_models_process", None) is proc:
             self._studio_models_process = None
         proc.deleteLater()
@@ -291,7 +310,13 @@ class ControlCenter(QMainWindow):
         data=CONTROL.load(); data.update({"preview_interval_ms":self.preview_interval.value(),"preview_max":self.preview_size.value()}); CONTROL.save(data); self.timer.setInterval(self.preview_interval.value())
 
     def save_ai_selection(self):
-        data=CONTROL.load(); data["ai_provider"]=self.provider.currentText(); data["ai_model"]=self.model.currentData() or self.model.currentText(); CONTROL.save(data); self.provider_output.append(f"Selected: {data['ai_provider']} / {data['ai_model']}")
+        data=CONTROL.load()
+        data["ai_provider"]=self.provider.currentText()
+        data["ai_model"]=self.model.currentData() or self.model.currentText()
+        CONTROL.save(data)
+        self.studio_provider.setCurrentText(data["ai_provider"])
+        self.studio_refresh_models()
+        self.provider_output.append(f"Selected: {data['ai_provider']} / {data['ai_model']}")
 
     def _server_pid(self):
         try:
@@ -341,14 +366,18 @@ class ControlCenter(QMainWindow):
         proc=QProcess(self)
         proc.setWorkingDirectory(str(ROOT))
         proc.setProgram(str(PROJECT_PYTHON))
+        proc.setProperty("provider", provider)
         proc.setArguments(["-m","gimp_mcp.provider_cli","status",provider])
         proc.finished.connect(lambda _code,_status,p=proc: self._provider_status_finished(p))
         self._provider_process=proc
         proc.start()
 
     def _provider_status_finished(self, proc):
+        provider=str(proc.property("provider") or "")
         stdout=bytes(proc.readAllStandardOutput()).decode("utf-8","replace")
         stderr=bytes(proc.readAllStandardError()).decode("utf-8","replace")
+        if provider != self.provider.currentText():
+            proc.deleteLater(); return
         text=(stdout or stderr).strip(); self.provider_output.setPlainText(text); self.model.clear()
         try:
             payload=json.loads(stdout); models=payload.get("models") or []
@@ -357,8 +386,12 @@ class ControlCenter(QMainWindow):
                     mid=str(item.get("id") or item.get("model") or item.get("name") or ""); label=str(item.get("display") or item.get("display_name") or item.get("name") or mid); self.model.addItem(label,mid)
                 else: self.model.addItem(str(item),str(item))
             wanted=CONTROL.load().get("ai_model","")
+            if not self._model_matches_provider(provider, wanted): wanted=""
+            selected=False
             for i in range(self.model.count()):
-                if self.model.itemData(i)==wanted: self.model.setCurrentIndex(i); break
+                if self.model.itemData(i)==wanted:
+                    self.model.setCurrentIndex(i); selected=True; break
+            if not selected and self.model.count(): self.model.setCurrentIndex(0)
         except Exception:
             if not text: self.provider_output.setPlainText("Provider check returned no usable data.")
         proc.deleteLater()

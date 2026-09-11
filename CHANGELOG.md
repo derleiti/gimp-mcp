@@ -2,6 +2,13 @@
 
 ## 0.4.0 - 2026-09-11
 
+### Provider routing hardening
+- Reject cross-provider account model IDs before invoking any official CLI.
+- Prevent stale asynchronous model catalogues from overwriting the currently selected provider.
+- Clear editable model text immediately on provider changes.
+- Disable user-configured Codex MCP servers per subprocess while preserving ChatGPT account/model configuration.
+- Run Claude planning with an explicit empty strict MCP configuration.
+
 ### Native provider independence
 - Removed the runtime dependency on AICoder for ChatGPT, Claude, Gemini and Mistral account access.
 - Added native official-client status/login/chat routing via Codex CLI, Claude Code, Antigravity and Mistral Vibe.
