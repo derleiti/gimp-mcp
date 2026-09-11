@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QProcess, QTimer, Qt
 from PyQt6.QtGui import QPixmap
 from gimp_mcp.control_settings import ControlSettings
 from gimp_mcp.live_bridge import LiveBridge
@@ -23,6 +23,8 @@ STATE = Path(os.getenv("GIMP_MCP_STATE_DIR", str(Path.home() / ".local/state/gim
 EVENTS = STATE / "events.jsonl"
 SESSIONS = Path(os.getenv("GIMP_MCP_SESSION_ROOT", "/tmp/gimp-mcp/sessions"))
 PIDFILE = STATE / "server.pid"
+ROOT = Path(os.getenv("GIMP_MCP_ROOT", str(Path.home() / "gimp-mcp"))).resolve()
+PROJECT_PYTHON = ROOT / ".venv/bin/python"
 CONTROL = ControlSettings(STATE / "control.json")
 
 
@@ -150,7 +152,10 @@ class ControlCenter(QMainWindow):
         live_install=QPushButton('Install / Update GIMP Live Plug-in'); live_install.clicked.connect(self.install_live_plugin)
         row.addWidget(start); row.addWidget(stop); row.addWidget(live_install); row.addStretch()
         self.endpoint=QLineEdit("http://127.0.0.1:8000/mcp"); self.endpoint.setReadOnly(True)
-        v.addWidget(self.server_status); v.addLayout(row); v.addWidget(QLabel("Streamable HTTP endpoint")); v.addWidget(self.endpoint)
+        copy_endpoint=QPushButton("Copy endpoint"); copy_endpoint.clicked.connect(lambda: QApplication.clipboard().setText(self.endpoint.text()))
+        endpoint_row=QHBoxLayout(); endpoint_row.addWidget(self.endpoint,1); endpoint_row.addWidget(copy_endpoint)
+        v.addWidget(self.server_status); v.addLayout(row); v.addWidget(QLabel("Streamable HTTP endpoint (for MCP clients — not a browser chat page)")); v.addLayout(endpoint_row)
+        v.addWidget(QLabel('Opening /mcp directly in a browser may show "Missing session ID"; that is expected because a browser GET does not perform the MCP initialize handshake.'))
         v.addWidget(QLabel('Live GIMP mode: install the plug-in once, then restart GIMP. When connected, successful MCP edits are mirrored into the visible GIMP display.'))
         v.addStretch(); return w
 
@@ -185,7 +190,7 @@ class ControlCenter(QMainWindow):
         return w
 
     def _setup_manager(self):
-        return SetupManager(Path.home()/"gimp-mcp")
+        return SetupManager(ROOT)
 
     def setup_check(self):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -236,14 +241,25 @@ class ControlCenter(QMainWindow):
 
     def _server_pid(self):
         try:
-            pid=int(PIDFILE.read_text().strip()); os.kill(pid,0); return pid
-        except Exception: return None
+            pid=int(PIDFILE.read_text().strip())
+            os.kill(pid,0)
+            cmdline=Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+            if "gimp_mcp.server" not in cmdline:
+                PIDFILE.unlink(missing_ok=True)
+                return None
+            return pid
+        except Exception:
+            PIDFILE.unlink(missing_ok=True)
+            return None
 
     def start_server(self):
         if self._server_pid(): return
-        cmd=["uv","run","python","-c","from gimp_mcp.server import mcp; mcp.run(transport='streamable-http')"]
+        if not PROJECT_PYTHON.exists():
+            QMessageBox.critical(self,"MCP Server","Project environment is missing. Run uv sync first.")
+            return
+        cmd=[str(PROJECT_PYTHON),"-c","from gimp_mcp.server import mcp; mcp.run(transport='streamable-http')"]
         log=(STATE/"server.log").open("ab")
-        p=subprocess.Popen(cmd,cwd=str(Path.home()/"gimp-mcp"),stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+        p=subprocess.Popen(cmd,cwd=str(ROOT),stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
         PIDFILE.write_text(str(p.pid)); self.refresh()
 
     def stop_server(self):
@@ -254,7 +270,7 @@ class ControlCenter(QMainWindow):
         PIDFILE.unlink(missing_ok=True); self.refresh()
 
     def install_live_plugin(self):
-        script=Path.home()/"gimp-mcp/scripts/install-gimp-live-plugin"
+        script=ROOT/"scripts/install-gimp-live-plugin"
         try:
             r=subprocess.run([str(script)],capture_output=True,text=True,timeout=30,check=False)
             text=((r.stdout or '')+(r.stderr or '')).strip()
@@ -264,29 +280,48 @@ class ControlCenter(QMainWindow):
 
     def provider_status(self):
         provider=self.provider.currentText()
+        if not PROJECT_PYTHON.exists():
+            self.provider_output.setPlainText("Project environment missing; run Sync project first.")
+            return
         if provider == "triforce":
             code="from gimp_mcp.ai_control import AICoderAdapter; import json; a=AICoderAdapter(); print(json.dumps({'status':a.triforce_status(),'models':a.triforce_models()}, default=str))"
         else:
             code=f"from gimp_mcp.ai_control import AICoderAdapter; import json; a=AICoderAdapter(); print(json.dumps({{'status':[x for x in a.providers() if x.get('provider')=='{provider}'],'models':a.models('{provider}')}}, default=str))"
-        r=subprocess.run(["uv","run","python","-c",code],cwd=str(Path.home()/"gimp-mcp"),capture_output=True,text=True,timeout=45)
-        text=(r.stdout or r.stderr).strip(); self.provider_output.setPlainText(text); self.model.clear()
+        self.provider_output.setPlainText(f"Checking {provider}…")
+        proc=QProcess(self)
+        proc.setWorkingDirectory(str(ROOT))
+        proc.setProgram(str(PROJECT_PYTHON))
+        proc.setArguments(["-c",code])
+        proc.finished.connect(lambda _code,_status,p=proc: self._provider_status_finished(p))
+        self._provider_process=proc
+        proc.start()
+
+    def _provider_status_finished(self, proc):
+        stdout=bytes(proc.readAllStandardOutput()).decode("utf-8","replace")
+        stderr=bytes(proc.readAllStandardError()).decode("utf-8","replace")
+        text=(stdout or stderr).strip(); self.provider_output.setPlainText(text); self.model.clear()
         try:
-            payload=json.loads(r.stdout); models=payload.get("models") or []
+            payload=json.loads(stdout); models=payload.get("models") or []
             for item in models:
                 if isinstance(item,dict):
-                    mid=str(item.get("id") or item.get("model") or item.get("name") or ""); label=str(item.get("display_name") or item.get("name") or mid); self.model.addItem(label,mid)
+                    mid=str(item.get("id") or item.get("model") or item.get("name") or ""); label=str(item.get("display") or item.get("display_name") or item.get("name") or mid); self.model.addItem(label,mid)
                 else: self.model.addItem(str(item),str(item))
             wanted=CONTROL.load().get("ai_model","")
             for i in range(self.model.count()):
                 if self.model.itemData(i)==wanted: self.model.setCurrentIndex(i); break
-        except Exception: pass
+        except Exception:
+            if not text: self.provider_output.setPlainText("Provider check returned no usable data.")
+        proc.deleteLater()
 
     def provider_connect(self):
         provider=self.provider.currentText()
         if provider == "triforce":
             self.provider_output.setPlainText("AILinux/TriForce login is shared with AICoder. Use AICoder login/setup, then refresh here."); return
         code=f"from gimp_mcp.ai_control import AICoderAdapter; import json; print(json.dumps(AICoderAdapter().connect('{provider}', open_browser=True), default=str))"
-        subprocess.Popen(["uv","run","python","-c",code],cwd=str(Path.home()/"gimp-mcp"))
+        if not PROJECT_PYTHON.exists():
+            self.provider_output.setPlainText("Project environment missing; run Sync project first.")
+            return
+        subprocess.Popen([str(PROJECT_PYTHON),"-c",code],cwd=str(ROOT),start_new_session=True)
         self.provider_output.setPlainText(f"Started official {provider} login flow. Complete it in the opened browser/terminal.")
 
     def _session_changed(self, sid):

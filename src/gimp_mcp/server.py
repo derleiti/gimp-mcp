@@ -130,6 +130,7 @@ def session_undo(session_id: str) -> dict[str, Any]:
     try:
         s=sessions.get(session_id)
         with s.lock: changed=sessions.undo(s)
+        if changed: ops.sync_visible(s)
         return _ok({'undone':changed})
     except GimpMcpError as exc: return exc.as_dict()
 
@@ -139,6 +140,7 @@ def session_redo(session_id: str) -> dict[str, Any]:
     try:
         s=sessions.get(session_id)
         with s.lock: changed=sessions.redo(s)
+        if changed: ops.sync_visible(s)
         return _ok({'redone':changed})
     except GimpMcpError as exc: return exc.as_dict()
 
@@ -170,6 +172,11 @@ def layer_delete(session_id: str, layer_id: int) -> dict[str, Any]:
 def layer_update(session_id: str, layer_id: int, name: str | None = None, visible: bool | None = None, opacity: float | None = None) -> dict[str, Any]:
     '''Rename a layer and/or set visibility/opacity. Opacity is percent 0..100.'''
     return _call(ops.layer_set, sessions.get(session_id), layer_id, name=name, visible=visible, opacity=opacity)
+
+@mcp.tool()
+def layer_fill(session_id: str, layer_id: int, color: str = "black") -> dict[str, Any]:
+    """Fill the selected area of a layer with a CSS/Gegl color; with no selection this fills the layer. Snapshot-undoable."""
+    return _call(ops.layer_fill, sessions.get(session_id), layer_id, color)
 
 @mcp.tool()
 def layer_reorder(session_id: str, layer_id: int, position: int) -> dict[str, Any]:
@@ -246,10 +253,12 @@ def pdb_describe(name: str) -> dict[str, Any]:
 def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "session_create": session_create,
+        "session_info": session_info,
         "layer_create": layer_create,
         "layer_delete": layer_delete,
         "layer_update": layer_update,
         "layer_reorder": layer_reorder,
+        "layer_fill": layer_fill,
         "selection_set": selection_set,
         "text_create": text_create,
         "transform_layer": transform_layer,
@@ -259,7 +268,11 @@ def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     fn = allowed.get(name)
     if fn is None:
         return {"ok": False, "error": {"code": "UNKNOWN_TOOL", "message": f"Studio tool not allowed: {name}", "recoverable": False}}
-    return fn(**arguments)
+    mode = str(arguments.pop("__job_mode", "auto"))
+    if mode == "live" and not live_bridge.status().get("ok") and name != "session_create":
+        return {"ok": False, "error": {"code": "LIVE_BRIDGE_UNAVAILABLE", "message": "Live mode requested but the persistent GIMP bridge is not connected", "recoverable": True}}
+    with ops.execution_mode(mode):
+        return fn(**arguments)
 
 
 def _prompt_runner() -> PromptRunner:

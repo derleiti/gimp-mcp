@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import json, math, random
+import json, math, random, threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from .bridge import GimpBridge
@@ -25,9 +26,31 @@ class GimpOperations:
     def __init__(self, bridge: GimpBridge, sessions: SessionManager) -> None:
         self.bridge, self.sessions = bridge, sessions
         self.live = LiveBridge()
+        self._execution = threading.local()
+
+    @contextmanager
+    def execution_mode(self, mode: str):
+        previous = getattr(self._execution, "mode", "auto")
+        self._execution.mode = mode if mode in {"auto", "live", "batch"} else "auto"
+        try:
+            yield
+        finally:
+            self._execution.mode = previous
+
+    def _mode(self) -> str:
+        return getattr(self._execution, "mode", "auto")
+
+    def _live_ready(self) -> bool:
+        if self._mode() == "batch":
+            return False
+        return bool(self.live.status().get("ok"))
 
     def _mirror(self, s: ArtworkSession) -> None:
-        self.live.mirror_if_available(s.document)
+        if self._mode() != "batch":
+            self.live.mirror_if_available(s.document)
+
+    def sync_visible(self, s: ArtworkSession) -> None:
+        self._mirror(s)
 
     def _mutate(self, s: ArtworkSession, body: str) -> Any:
         with s.lock:
@@ -71,7 +94,7 @@ class GimpOperations:
     def layer_set(self, s: ArtworkSession, layer_id: int, *, name: str | None = None, visible: bool | None = None, opacity: float | None = None) -> dict[str, Any]:
         if opacity is not None and not 0 <= opacity <= 100:
             raise GimpMcpError('INVALID_ARGUMENT', 'opacity must be 0..100', False)
-        if self.live.status().get('ok'):
+        if self._live_ready():
             with s.lock:
                 snap = self.sessions.snapshot(s)
                 try:
@@ -88,6 +111,16 @@ class GimpOperations:
         if visible is not None: body += f"layer.set_visible({bool(visible)})\n"
         if opacity is not None: body += f"layer.set_opacity({float(opacity)})\n"
         body += _save(s.document) + "result={'layer_id':layer_id,'name':layer.get_name(),'visible':layer.get_visible(),'opacity':layer.get_opacity()}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def layer_fill(self, s: ArtworkSession, layer_id: int, color: str) -> dict[str, Any]:
+        color = str(color).strip()
+        if not color or len(color) > 128 or any(ord(ch) < 32 for ch in color):
+            raise GimpMcpError("INVALID_ARGUMENT", "color must be a non-empty CSS/Gegl color string", False)
+        body = _load(s.document) + _layer_lookup(layer_id)
+        body += f"color_text={_q(color)}\ncolor=Gegl.Color.new(color_text)\nif color is None: raise RuntimeError('INVALID_COLOR')\n"
+        body += "Gimp.context_push()\ntry:\n Gimp.context_set_foreground(color)\n layer.edit_fill(Gimp.FillType.FOREGROUND)\nfinally:\n Gimp.context_pop()\n"
+        body += _save(s.document) + "result={'layer_id':layer_id,'color':color_text}\nimg.delete()\n"
         return self._mutate(s, body)
 
     def layer_reorder(self, s: ArtworkSession, layer_id: int, position: int) -> dict[str, Any]:
@@ -116,7 +149,7 @@ class GimpOperations:
         return self._mutate(s, body)
 
     def transform(self, s: ArtworkSession, layer_id: int, action: str, values: list[float]) -> dict[str, Any]:
-        if action == 'translate' and len(values) == 2 and self.live.status().get('ok'):
+        if action == 'translate' and len(values) == 2 and self._live_ready():
             with s.lock:
                 snap = self.sessions.snapshot(s)
                 try:
@@ -140,7 +173,7 @@ class GimpOperations:
 
     def filter_apply(self, s: ArtworkSession, layer_id: int, operation: str, parameters: dict[str, Any], name: str | None = None) -> dict[str, Any]:
         body = _load(s.document) + _layer_lookup(layer_id)
-        body += f"operation={_q(operation)};params={json.dumps(parameters)};filter_name={_q(name or operation)}\n"
+        body += f"operation={_q(operation)};params=json.loads({_q(json.dumps(parameters, ensure_ascii=False))});filter_name={_q(name or operation)}\n"
         body += "flt=Gimp.DrawableFilter.new(layer,operation,filter_name)\nif flt is None: raise RuntimeError('FILTER_NOT_FOUND')\nconfig=flt.get_config()\n"
         body += "for key,value in params.items(): config.set_property(key,value)\nflt.update();layer.append_filter(flt)\n"
         body += _save(s.document) + "result={'layer_id':layer_id,'operation':operation,'name':filter_name,'filter_count':len(layer.get_filters())}\nimg.delete()\n"

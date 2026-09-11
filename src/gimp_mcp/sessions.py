@@ -35,7 +35,10 @@ class SessionManager:
 
     def _persist(self, s: ArtworkSession) -> None:
         data = {"session_id": s.session_id, "source": str(s.source) if s.source else None, "revision": s.revision}
-        self._meta_path(s).write_text(json.dumps(data, indent=2), encoding="utf-8")
+        path = self._meta_path(s)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(path)
 
     def _recover_existing(self) -> None:
         for workdir in self.root.iterdir():
@@ -83,6 +86,8 @@ class SessionManager:
         p = s.workdir / f"undo-{s.revision:06d}.xcf"
         shutil.copy2(s.document, p)
         s.undo_stack.append(p)
+        for old in s.redo_stack:
+            old.unlink(missing_ok=True)
         s.redo_stack.clear()
         self._persist(s)
         return p

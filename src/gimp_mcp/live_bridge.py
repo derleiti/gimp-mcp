@@ -31,7 +31,12 @@ class LiveBridge:
         return json.loads(data.split(b'\n', 1)[0].decode('utf-8'))
 
     def available(self) -> bool:
-        return self.socket_path.exists()
+        if not self.socket_path.exists():
+            return False
+        try:
+            return bool(self.request("ping").get("ok"))
+        except Exception:
+            return False
 
     def status(self) -> dict[str, Any]:
         try:

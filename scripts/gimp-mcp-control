@@ -2,14 +2,21 @@
 set -eu
 ROOT="${GIMP_MCP_ROOT:-$HOME/gimp-mcp}"
 cd "$ROOT"
-if ! /usr/bin/python3 -c "import PyQt6" >/dev/null 2>&1; then
-  echo "PyQt6 fehlt. Installiere GUI-Abhaengigkeit via PolicyKit..." >&2
-  if command -v pkexec >/dev/null 2>&1; then
-    pkexec apt-get install -y python3-pyqt6
-  else
-    echo "Bitte installieren: sudo apt install python3-pyqt6" >&2
-    exit 1
-  fi
+
+# Prefer the project environment. This keeps GUI/MCP versions identical and
+# avoids depending on whichever Python happens to be the distro default.
+if [ -x "$ROOT/.venv/bin/python" ]; then
+  exec "$ROOT/.venv/bin/python" -m gimp_mcp.gui "$@"
 fi
-export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-exec /usr/bin/python3 -m gimp_mcp.gui "$@"
+
+UV="$(command -v uv 2>/dev/null || true)"
+if [ -z "$UV" ] && [ -x "$HOME/.local/bin/uv" ]; then
+  UV="$HOME/.local/bin/uv"
+fi
+if [ -n "$UV" ]; then
+  "$UV" sync --group dev
+  exec "$ROOT/.venv/bin/python" -m gimp_mcp.gui "$@"
+fi
+
+echo "GIMP MCP environment missing. Install uv, then run: uv sync --group dev" >&2
+exit 1

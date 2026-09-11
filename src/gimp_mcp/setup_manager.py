@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
+
+def _find_uv() -> str | None:
+    found = shutil.which("uv")
+    if found:
+        return found
+    candidate = Path.home() / ".local/bin/uv"
+    return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
 SYSTEM_PACKAGES = [
     "gimp", "python3-gi", "gir1.2-gimp-3.0", "python3-venv",
     "python3-pyqt6", "git", "curl",
@@ -44,7 +51,7 @@ def _apt_policy(package: str) -> dict[str, str]:
 
 def _fetch_json(url: str, timeout: int = 8) -> dict[str, Any] | None:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "gimp-mcp-studio/0.2"})
+        req = urllib.request.Request(url, headers={"User-Agent": "gimp-mcp-studio/0.4"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.load(resp)
     except Exception:
@@ -53,7 +60,7 @@ def _fetch_json(url: str, timeout: int = 8) -> dict[str, Any] | None:
 
 def _fetch_text(url: str, timeout: int = 8) -> str:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "gimp-mcp-studio/0.2"})
+        req = urllib.request.Request(url, headers={"User-Agent": "gimp-mcp-studio/0.4"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except Exception:
@@ -100,7 +107,7 @@ class SetupManager:
                 status = "ok"
             rows.append(CheckRow(package, installed, candidate, "APT", status))
 
-        uv = shutil.which("uv")
+        uv = _find_uv()
         rows.append(CheckRow("uv", _version([uv, "--version"]) if uv else "missing", "check upstream", "Astral", "ok" if uv else "missing"))
 
         try:
@@ -152,7 +159,7 @@ class SetupManager:
         return _run(cmd, timeout=300, cwd=self.root)
 
     def sync_project(self, *, upgrade: bool = False) -> subprocess.CompletedProcess[str]:
-        uv = shutil.which("uv")
+        uv = _find_uv()
         if not uv:
             raise RuntimeError("uv fehlt")
         if upgrade:
@@ -162,13 +169,13 @@ class SetupManager:
         return _run([uv, "sync", "--group", "dev"], timeout=300, cwd=self.root)
 
     def update_uv(self) -> subprocess.CompletedProcess[str]:
-        uv = shutil.which("uv")
+        uv = _find_uv()
         if not uv:
             raise RuntimeError("uv fehlt; installiere es zuerst über https://docs.astral.sh/uv/")
         return _run([uv, "self", "update"], timeout=180, cwd=self.root)
 
     def self_test(self) -> dict[str, Any]:
-        uv = shutil.which("uv")
+        uv = _find_uv()
         if not uv:
             return {"ok": False, "error": "uv fehlt"}
         test = _run([uv, "run", "pytest", "-q"], timeout=300, cwd=self.root)

@@ -44,7 +44,7 @@ uv run mcp run src/gimp_mcp/server.py:mcp --transport streamable-http
 
 Session/Document: `gimp_status`, `session_create`, `session_open`, `session_info`, `session_undo`, `session_redo`, `session_close`, `document_save_as`.
 
-Layers/Editing: `layer_create`, `layer_delete`, `layer_update`, `layer_reorder`, `selection_set`, `text_create`, `transform_layer`.
+Layers/Editing: `layer_create`, `layer_delete`, `layer_update`, `layer_reorder`, `layer_fill`, `selection_set`, `text_create`, `transform_layer`.
 
 Effects/Output: `filter_list`, `filter_describe`, `filter_apply`, `preview_render`, `export_image`.
 
@@ -153,3 +153,5 @@ Model output is treated as untrusted input. The PromptRunner accepts only struct
 Direct persistent editing currently covers layer rename, visibility, opacity and translation. The plug-in saves direct mutations back to the session XCF and flushes displays. Other operations continue through the isolated batch path and mirror back into the visible GIMP document.
 
 See `docs/QUICKSTART.md` and `CHANGELOG.md`.
+
+Studio plans can use `$background_layer_id` for the initial layer and `$last_layer_id` for a layer created earlier in the same plan; numeric IDs should never be invented by a model.

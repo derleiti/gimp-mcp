@@ -5,7 +5,7 @@ from gimp_mcp.setup_manager import SetupManager
 
 def test_setup_manager_self_test_shape(tmp_path: Path, monkeypatch):
     manager = SetupManager(tmp_path)
-    monkeypatch.setattr("gimp_mcp.setup_manager.shutil.which", lambda name: None if name == "uv" else f"/usr/bin/{name}")
+    monkeypatch.setattr("gimp_mcp.setup_manager._find_uv", lambda: None)
     assert manager.self_test() == {"ok": False, "error": "uv fehlt"}
 
 

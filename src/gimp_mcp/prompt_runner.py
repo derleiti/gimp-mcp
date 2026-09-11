@@ -9,7 +9,7 @@ from .jobs import ArtworkJob, JobManager
 
 ALLOWED_TOOLS = {
     "layer_create", "layer_delete", "layer_update", "layer_reorder",
-    "selection_set", "text_create", "transform_layer", "filter_apply",
+    "selection_set", "text_create", "transform_layer", "layer_fill", "filter_apply",
     "preview_render",
 }
 MUTATING_TOOLS = ALLOWED_TOOLS - {"preview_render"}
@@ -18,7 +18,10 @@ SYSTEM_PROMPT = """You are the art director for GIMP MCP Studio.
 Return ONLY one JSON object with keys goal and steps. Each step must have tool,
 arguments and reason. Never emit Python, shell commands, file-system commands,
 or tools outside this allowlist: %s. Keep the plan short and executable.
-The session_id is injected by the host; never invent one.""" % ", ".join(sorted(ALLOWED_TOOLS))
+The session_id is injected by the host; never invent one.
+For layer IDs created during this plan, use the exact string "$last_layer_id".
+For the initial/background layer use "$background_layer_id" when available.
+Never invent numeric layer IDs.""" % ", ".join(sorted(ALLOWED_TOOLS))
 
 
 class PlanError(ValueError):
@@ -58,6 +61,24 @@ def parse_plan(raw: str) -> dict[str, Any]:
     return {"goal": str(data.get("goal") or ""), "steps": cleaned}
 
 
+def _resolve_refs(value: Any, refs: dict[str, Any]) -> Any:
+    if isinstance(value, str) and value.startswith("$"):
+        key = value[1:]
+        if key not in refs:
+            raise PlanError(f"unknown runtime reference: {value}")
+        return refs[key]
+    if isinstance(value, list):
+        return [_resolve_refs(item, refs) for item in value]
+    if isinstance(value, dict):
+        return {key: _resolve_refs(item, refs) for key, item in value.items()}
+    return value
+
+
+def _result_data(result: dict[str, Any]) -> dict[str, Any]:
+    data = result.get("data") if isinstance(result, dict) else None
+    return data if isinstance(data, dict) else (result if isinstance(result, dict) else {})
+
+
 class PromptRunner:
     def __init__(self, jobs: JobManager, ai_chat: Callable[..., str], tool_call: Callable[[str, dict[str, Any]], dict[str, Any]], *, preview_every: int = 2, repair_attempts: int = 2) -> None:
         self.jobs = jobs
@@ -70,59 +91,81 @@ class PromptRunner:
         raw = self.ai_chat(provider=job.provider, model=job.model, message=request, system_prompt=SYSTEM_PROMPT)
         return parse_plan(raw)
 
-    def _execute_plan(self, job: ArtworkJob, plan: dict[str, Any]) -> None:
+    def _execute_plan(self, job: ArtworkJob, plan: dict[str, Any], refs: dict[str, Any] | None = None) -> None:
         steps = plan["steps"]
         total = max(1, len(steps))
         mutations_since_preview = 0
+        refs = dict(refs or {})
         for index, step in enumerate(steps, 1):
             self.jobs.checkpoint(job.job_id)
             self.jobs.update(job, status="running", current_step=index, progress=round((index - 1) / total * 100, 1))
-            args = dict(step["arguments"])
+            args = _resolve_refs(dict(step["arguments"]), refs)
+            args["__job_mode"] = job.mode
             if job.session_id and "session_id" not in args:
                 args["session_id"] = job.session_id
             result = self.tool_call(step["tool"], args)
             if not isinstance(result, dict) or result.get("ok") is False:
                 raise RuntimeError(f"{step['tool']} failed: {result}")
+            data = _result_data(result)
+            if data.get("layer_id") is not None:
+                refs["last_layer_id"] = data["layer_id"]
             if step["tool"] in MUTATING_TOOLS:
                 mutations_since_preview += 1
                 if mutations_since_preview >= self.preview_every:
                     self.jobs.update(job, status="rendering_preview")
-                    preview = self.tool_call("preview_render", {"session_id": job.session_id})
+                    preview = self.tool_call("preview_render", {"session_id": job.session_id, "__job_mode": job.mode})
                     if not isinstance(preview, dict) or preview.get("ok") is False:
                         raise RuntimeError(f"preview_render failed: {preview}")
                     mutations_since_preview = 0
         if job.session_id and (mutations_since_preview or not steps):
             self.jobs.update(job, status="rendering_preview")
-            self.tool_call("preview_render", {"session_id": job.session_id})
+            self.tool_call("preview_render", {"session_id": job.session_id, "__job_mode": job.mode})
         self.jobs.update(job, progress=100.0)
 
     def run(self, job: ArtworkJob) -> ArtworkJob:
         self.jobs.start(job)
         try:
+            refs: dict[str, Any] = {}
             if not job.session_id:
-                created = self.tool_call("session_create", {})
+                created = self.tool_call("session_create", {"__job_mode": job.mode})
                 if not isinstance(created, dict) or not created.get("ok"):
                     raise RuntimeError(f"session_create failed: {created}")
-                job.session_id = str(created["data"]["session_id"])
+                created_data = _result_data(created)
+                job.session_id = str(created_data["session_id"])
+                if created_data.get("layer_id") is not None:
+                    refs["background_layer_id"] = created_data["layer_id"]
+                    refs["last_layer_id"] = created_data["layer_id"]
                 self.jobs.update(job, session_id=job.session_id)
-            request = job.prompt
-            last_error = ""
+            else:
+                info = self.tool_call("session_info", {"session_id": job.session_id, "__job_mode": job.mode})
+                info_data = _result_data(info) if isinstance(info, dict) and info.get("ok") else {}
+                layers = info_data.get("layers") if isinstance(info_data.get("layers"), list) else []
+                if layers:
+                    refs["last_layer_id"] = layers[0].get("layer_id")
+                    refs["background_layer_id"] = layers[-1].get("layer_id")
+            ref_note = "\nRuntime references available: " + json.dumps(refs, ensure_ascii=False) if refs else ""
+            request = job.prompt + ref_note
+            plan = None
+            last_plan_error = ""
             for attempt in range(self.repair_attempts + 1):
                 self.jobs.checkpoint(job.job_id)
                 self.jobs.update(job, status="planning")
                 try:
-                    plan = self._ask_plan(job, request if not last_error else request + "\nPrevious plan/execution error: " + last_error + "\nReturn a corrected plan only.")
-                    self.jobs.update(job, plan=plan)
-                    self._execute_plan(job, plan)
-                    self.jobs.update(job, status="reviewing")
-                    self.jobs.update(job, status="completed", finished_at=time.time(), error=None)
-                    return job
-                except InterruptedError:
-                    raise
-                except Exception as exc:
-                    last_error = str(exc)
+                    prompt = request if not last_plan_error else request + "\nPrevious plan parsing error: " + last_plan_error + "\nReturn corrected JSON only."
+                    plan = self._ask_plan(job, prompt)
+                    break
+                except PlanError as exc:
+                    last_plan_error = str(exc)
                     if attempt >= self.repair_attempts:
                         raise
+            if plan is None:
+                raise PlanError(last_plan_error or "model did not return a usable plan")
+            self.jobs.update(job, plan=plan)
+            # Once semantic execution starts, never replay the entire plan after a
+            # tool failure: successful earlier mutations may already be persisted.
+            self._execute_plan(job, plan, refs)
+            self.jobs.update(job, status="reviewing")
+            self.jobs.update(job, status="completed", finished_at=time.time(), error=None)
             return job
         except InterruptedError:
             self.jobs.cancel(job.job_id)
