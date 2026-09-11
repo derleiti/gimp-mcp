@@ -25,6 +25,8 @@ class GimpMcpLive(Gimp.PlugIn):
         self._listener = None
         self._thread = None
         self._image = None
+        self._images = {}
+        self._headless = os.environ.get("GIMP_MCP_HEADLESS") == "1"
         self._lock = threading.Lock()
 
     def do_set_i18n(self, procedure_name):
@@ -125,10 +127,31 @@ class GimpMcpLive(Gimp.PlugIn):
     def _send(conn, payload):
         conn.sendall((json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8'))
 
+    def _image_for_payload(self, payload, *, required=True):
+        raw = str(payload.get('path') or '').strip()
+        if raw:
+            key = str(Path(raw).expanduser().resolve())
+            image = self._images.get(key)
+            if image is not None and not image.is_valid():
+                self._images.pop(key, None); image = None
+            if image is None and Path(key).is_file():
+                image = Gimp.file_load(Gimp.RunMode.NONINTERACTIVE, Gio.File.new_for_path(key))
+                if image is not None:
+                    self._images[key] = image
+            if image is not None:
+                self._image = image
+                return image
+        image = self._image
+        if image is not None and not image.is_valid():
+            self._image = None; image = None
+        if required and image is None:
+            raise RuntimeError('no GIMP workspace image is open')
+        return image
+
     def _handle(self, payload):
         command = str(payload.get('command') or '')
         if command == 'ping':
-            return {'ok': True, 'mode': 'persistent', 'gimp_version': str(Gimp.version()), 'socket': str(SOCKET_PATH)}
+            return {'ok': True, 'mode': 'headless' if self._headless else 'persistent', 'headless': self._headless, 'gimp_version': str(Gimp.version()), 'socket': str(SOCKET_PATH), 'documents': len(self._images)}
         if command == 'active_info':
             image = self._image
             if image is not None and not image.is_valid():
@@ -142,12 +165,7 @@ class GimpMcpLive(Gimp.PlugIn):
                 },
             }
         if command == 'vision_snapshot':
-            image = self._image
-            if image is not None and not image.is_valid():
-                self._image = None
-                image = None
-            if image is None:
-                raise RuntimeError('no live image is open')
+            image = self._image_for_payload(payload)
             output = Path(str(payload.get('output') or '')).expanduser().resolve()
             if output.suffix.lower() != '.png':
                 raise RuntimeError('vision snapshot output must be .png')
@@ -184,12 +202,7 @@ class GimpMcpLive(Gimp.PlugIn):
                 'document_info': {'width': image.get_width(), 'height': image.get_height(), 'layer_count': len(info_layers), 'layers': info_layers},
             }
         if command in {'layer_update', 'translate', 'undo'}:
-            image = self._image
-            if image is not None and not image.is_valid():
-                self._image = None
-                image = None
-            if image is None:
-                raise RuntimeError('no live image is open')
+            image = self._image_for_payload(payload)
             raw = str(payload.get('path') or '')
             path = Path(raw).expanduser().resolve()
             if not path.is_file() or path.suffix.lower() != '.xcf':
@@ -227,23 +240,25 @@ class GimpMcpLive(Gimp.PlugIn):
             path = Path(raw).expanduser().resolve()
             if not path.is_file() or path.suffix.lower() != '.xcf':
                 raise RuntimeError('show_document requires an existing .xcf file')
-            new_image = Gimp.file_load(Gimp.RunMode.NONINTERACTIVE, Gio.File.new_for_path(str(path)))
+            key = str(path)
+            old_for_path = self._images.get(key)
+            new_image = Gimp.file_load(Gimp.RunMode.NONINTERACTIVE, Gio.File.new_for_path(key))
             if new_image is None:
                 raise RuntimeError('GIMP could not load document')
+            self._images[key] = new_image
             old_image = self._image
-            if old_image is not None and old_image.is_valid():
-                try:
-                    Gimp.displays_reconnect(old_image, new_image)
-                    # displays_reconnect() may invalidate the old image immediately.
-                    # Never call gimp-image-delete with a stale image ID.
-                    if old_image.is_valid():
-                        old_image.delete()
-                except Exception:
+            if not self._headless:
+                if old_image is not None and old_image.is_valid():
+                    try:
+                        Gimp.displays_reconnect(old_image, new_image)
+                    except Exception:
+                        Gimp.Display.new(new_image)
+                else:
                     Gimp.Display.new(new_image)
-            else:
-                Gimp.Display.new(new_image)
+                Gimp.displays_flush()
             self._image = new_image
-            Gimp.displays_flush()
+            if old_for_path is not None and old_for_path is not new_image and old_for_path.is_valid():
+                old_for_path.delete()
             return {
                 'ok': True, 'path': str(path), 'width': new_image.get_width(),
                 'height': new_image.get_height(), 'layers': len(new_image.get_layers()),

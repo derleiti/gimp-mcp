@@ -10,8 +10,8 @@ from typing import Any
 
 FINAL_STATES = {"completed", "failed", "cancelled"}
 VALID_STATES = {
-    "queued", "planning", "running", "rendering_preview", "reviewing",
-    "paused", "completed", "failed", "cancelled",
+    "queued", "initializing", "planning", "running", "rendering_preview", "reviewing",
+    "paused", "stalled", "completed", "failed", "cancelled",
 }
 
 
@@ -33,6 +33,13 @@ class ArtworkJob:
     output_xcf: str | None = None
     output_image: str | None = None
     plan: dict[str, Any] | None = None
+    batch_number: int = 0
+    total_steps: int = 0
+    successful_mutations: int = 0
+    last_activity_at: float | None = None
+    last_progress_at: float | None = None
+    last_progress_signature: str | None = None
+    vision_notes: list[dict[str, Any]] = field(default_factory=list)
 
 
 class JobManager:
@@ -120,7 +127,8 @@ class JobManager:
     def start(self, job: ArtworkJob) -> None:
         self._cancel_events[job.job_id].clear()
         self._pause_events[job.job_id].clear()
-        self.update(job, status="planning", started_at=job.started_at or time.time(), finished_at=None, error=None)
+        now = time.time()
+        self.update(job, status="initializing", started_at=job.started_at or now, finished_at=None, error=None, last_activity_at=now, last_progress_at=job.last_progress_at or now)
 
     def pause(self, job_id: str) -> ArtworkJob:
         job = self.get(job_id)

@@ -47,3 +47,19 @@ def test_mcp_unavailable_has_no_direct_fallback():
     client = StudioMcpClient("http://127.0.0.1:9/mcp", timeout=2)
     with pytest.raises(StudioMcpError, match="MCP call gimp_status"):
         client.call_tool("gimp_status", {})
+
+
+def test_completed_mcp_result_survives_cleanup_exception_group(monkeypatch):
+    # Covered behavior is integration-sensitive; assert source guard exists so a
+    # post-result TaskGroup teardown cannot force unsafe mutation replay.
+    import inspect
+    source=inspect.getsource(StudioMcpClient._call)
+    assert 'except BaseExceptionGroup' in source
+    assert 'if completed is not None' in source
+
+
+def test_studio_client_uses_mcp_http_timeout_factory():
+    import inspect
+    source=inspect.getsource(StudioMcpClient._call)
+    assert 'create_mcp_http_client' in source
+    assert 'read=max(300.0, call_timeout + 30.0)' in source

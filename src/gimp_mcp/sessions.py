@@ -3,12 +3,43 @@ from __future__ import annotations
 import json
 import shutil
 import threading
+import fcntl
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import GimpMcpError
 
+
+
+
+class ProcessSafeRLock:
+    """Thread-reentrant + process-safe lock for one artwork document."""
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._thread = threading.RLock()
+        self._local = threading.local()
+
+    def __enter__(self):
+        self._thread.acquire()
+        depth = getattr(self._local, "depth", 0)
+        if depth == 0:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fh = self.path.open("a+")
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            self._local.fh = fh
+        self._local.depth = depth + 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        depth = getattr(self._local, "depth", 1) - 1
+        self._local.depth = depth
+        if depth == 0:
+            fh = self._local.fh
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fh.close()
+            del self._local.fh
+        self._thread.release()
 
 @dataclass(slots=True)
 class ArtworkSession:
@@ -19,7 +50,11 @@ class ArtworkSession:
     revision: int = 0
     undo_stack: list[Path] = field(default_factory=list)
     redo_stack: list[Path] = field(default_factory=list)
-    lock: threading.RLock = field(default_factory=threading.RLock)
+    lock: ProcessSafeRLock | None = None
+
+    def __post_init__(self) -> None:
+        if self.lock is None:
+            self.lock = ProcessSafeRLock(self.workdir / ".session.lock")
 
 
 class SessionManager:

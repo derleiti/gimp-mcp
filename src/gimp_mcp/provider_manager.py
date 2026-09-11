@@ -34,7 +34,7 @@ class ProviderManager:
     """
 
     def __init__(self, timeout: int = 120) -> None:
-        self.timeout = max(10, min(int(timeout), 300))
+        self.timeout = max(10, min(int(timeout), 3600))
 
     @staticmethod
     def _candidate(name: str) -> str | None:
@@ -273,8 +273,9 @@ class ProviderManager:
             return inner
         return model
 
-    def chat(self, provider: str, model: str, message: str, system_prompt: str) -> str:
+    def chat(self, provider: str, model: str, message: str, system_prompt: str, timeout: int | None = None) -> str:
         provider = provider.lower().strip()
+        request_timeout = max(10, min(int(timeout if timeout is not None else self.timeout), 3600))
         model = self._strip_account_model(provider, str(model).strip())
         if not model:
             rows = self.models(provider)
@@ -290,7 +291,7 @@ class ProviderManager:
                 r = self._run([exe, "exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only",
                                "-c", "approval_policy=\"never\"", *self._codex_mcp_disable_args(),
                                "-m", model, "-C", tmp, "-o", str(out), transcript],
-                              timeout=self.timeout, cwd=tmp)
+                              timeout=request_timeout, cwd=tmp)
                 if r.returncode != 0:
                     raise ProviderError((r.stderr or r.stdout).strip()[-1000:] or "Codex request failed")
                 text = out.read_text(encoding="utf-8", errors="replace").strip() if out.exists() else ""
@@ -302,7 +303,7 @@ class ProviderManager:
                 r = self._run([exe, "--print", "--output-format", "text", "--model", model,
                                "--tools", "", "--disallowed-tools", "*", "--disable-slash-commands",
                                "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--no-session-persistence", "--no-chrome", "--system-prompt", system_prompt,
-                               message], timeout=self.timeout, cwd=tmp, env=env)
+                               message], timeout=request_timeout, cwd=tmp, env=env)
                 if r.returncode != 0:
                     raise ProviderError((r.stderr or r.stdout).strip()[-1000:] or "Claude request failed")
                 text = r.stdout.strip()
@@ -312,7 +313,7 @@ class ProviderManager:
             with tempfile.TemporaryDirectory(prefix="gimp-mcp-agy-") as tmp:
                 r = self._run([exe, "--print", transcript, "--model", model, "--output-format", "json",
                                "--mode", "plan", "--sandbox", "--disable-slash-commands",
-                               "--print-timeout", f"{self.timeout}s"], timeout=self.timeout, cwd=tmp)
+                               "--print-timeout", f"{request_timeout}s"], timeout=request_timeout, cwd=tmp)
                 if r.returncode != 0:
                     raise ProviderError((r.stderr or r.stdout).strip()[-1000:] or "Antigravity request failed")
                 try:
@@ -329,12 +330,12 @@ class ProviderManager:
                 env = self._clean_env(); env["VIBE_ACTIVE_MODEL"] = model
                 r = self._run([exe, "--prompt", transcript, "--max-turns", "1", "--output", "text",
                                "--disabled-tools", "*", "--agent", "ask", "--workdir", tmp, "--trust"],
-                              timeout=self.timeout, cwd=tmp, env=env)
+                              timeout=request_timeout, cwd=tmp, env=env)
                 if r.returncode != 0:
                     raise ProviderError((r.stderr or r.stdout).strip()[-1000:] or "Mistral Vibe request failed")
                 text = r.stdout.strip()
         elif provider == "triforce":
-            return self._triforce_chat(model, message, system_prompt)
+            return self._triforce_chat(model, message, system_prompt, timeout=request_timeout)
         else:
             raise ProviderError(f"Unknown provider: {provider}")
         if not text:
@@ -388,7 +389,7 @@ class ProviderManager:
         return self._status("triforce", installed=True, authenticated=bool(token),
                             detail=f"Configured for {base}" if token else "Set GIMP_MCP_TRIFORCE_TOKEN for independent TriForce access")
 
-    def _triforce_request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+    def _triforce_request(self, method: str, path: str, payload: dict[str, Any] | None = None, *, timeout: int | None = None) -> Any:
         base, token = self._triforce_config()
         if not token:
             raise ProviderError("TriForce token is not configured in GIMP MCP")
@@ -397,7 +398,7 @@ class ProviderManager:
             "Authorization": f"Bearer {token}", "Content-Type": "application/json", "User-Agent": "gimp-mcp/0.4",
         })
         try:
-            with urllib.request.urlopen(req, timeout=min(self.timeout, 30)) as resp:
+            with urllib.request.urlopen(req, timeout=max(10, min(int(timeout if timeout is not None else self.timeout), 3600))) as resp:
                 return json.load(resp)
         except urllib.error.HTTPError as exc:
             raise ProviderError(f"TriForce HTTP {exc.code}") from exc
@@ -407,11 +408,11 @@ class ProviderManager:
         rows = data if isinstance(data, list) else data.get("models", [])
         return list(rows) if isinstance(rows, list) else []
 
-    def _triforce_chat(self, model: str, message: str, system_prompt: str) -> str:
+    def _triforce_chat(self, model: str, message: str, system_prompt: str, *, timeout: int | None = None) -> str:
         data = self._triforce_request("POST", "/v1/client/chat", {
             "model": model, "message": message, "system_prompt": system_prompt,
             "temperature": 0.2, "max_tokens": 4096,
-        })
+        }, timeout=timeout)
         text = str((data or {}).get("response") or (data or {}).get("text") or "").strip()
         if not text:
             raise ProviderError("TriForce returned an empty response")

@@ -21,6 +21,7 @@ from .jobs import JobManager
 from .prompt_runner import PromptRunner
 from .studio_mcp_client import StudioMcpClient
 from .vision import VisionRenderer
+from .control_settings import ControlSettings
 
 settings = Settings()
 policy = PathPolicy(settings.allowed_roots)
@@ -281,7 +282,7 @@ def _capture_vision_artifacts(s, *, grid_px: int = 64, show_layer_bounds: bool =
     live=live_bridge.status()
     if live.get('ok'):
         try:
-            snap=live_bridge.vision_snapshot(live_path)
+            snap=live_bridge.vision_snapshot(live_path, s.document)
             if snap.get('ok') and live_path.exists():
                 preview=live_path; source='live-gimp'; live_info=snap.get('document_info') if isinstance(snap.get('document_info'),dict) else None
         except Exception:
@@ -364,6 +365,18 @@ def pdb_search(query: str = '', limit: int = 100) -> dict[str, Any]:
     return _call(ops.pdb_search, query, limit)
 
 @mcp.tool()
+def pdb_call(session_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Expert GIMP 3 PDB bridge. Calls a discovered official PDB procedure against a session. Use pdb_describe first. GimpImage args accept any value and bind to the session; Drawable/Layer/Item args accept layer_id; GFile accepts a path; RunMode accepts NONINTERACTIVE/INTERACTIVE/WITH_LAST_VALS."""
+    return _call(ops.pdb_call, sessions.get(session_id), name, arguments)
+
+@mcp.tool()
+def headless_workspace_status() -> dict[str, Any]:
+    """Report visible/headless workspace state and configured headless GIMP worker pool without exposing credentials."""
+    status=live_bridge.status()
+    if live_bridge.headless is not None: status['headless_pool']=live_bridge.headless.status()
+    return _ok(status)
+
+@mcp.tool()
 def pdb_describe(name: str) -> dict[str, Any]:
     '''Expert discovery: inspect the arguments and returns of one GIMP PDB procedure. This tool is read-only.'''
     return _call(ops.pdb_describe, name)
@@ -384,6 +397,11 @@ def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         "text_create": text_create,
         "transform_layer": transform_layer,
         "filter_apply": filter_apply,
+        "filter_list": filter_list,
+        "filter_describe": filter_describe,
+        "pdb_search": pdb_search,
+        "pdb_describe": pdb_describe,
+        "pdb_call": pdb_call,
         "preview_render": preview_render,
         "vision_capture": vision_capture,
     }
@@ -391,19 +409,37 @@ def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if fn is None:
         return {"ok": False, "error": {"code": "UNKNOWN_TOOL", "message": f"Studio tool not allowed: {name}", "recoverable": False}}
     mode = str(arguments.pop("__job_mode", "auto"))
+    if name in {"filter_list", "filter_describe", "pdb_search", "pdb_describe"}: arguments.pop("session_id", None)
     if mode == "live" and not live_bridge.status().get("ok") and name != "session_create":
         return {"ok": False, "error": {"code": "LIVE_BRIDGE_UNAVAILABLE", "message": "Live mode requested but the persistent GIMP bridge is not connected", "recoverable": True}}
     with ops.execution_mode(mode):
         return fn(**arguments)
 
 
+def _runner_options() -> dict[str, Any]:
+    c=ControlSettings(settings.state_dir / "control.json").load()
+    return {
+        "creative_budget": c.get("creative_budget","effectively_unlimited"),
+        "max_steps_per_batch": c.get("max_steps_per_batch",20),
+        "provider_planning_timeout": c.get("provider_planning_timeout",600),
+        "provider_review_timeout": c.get("provider_review_timeout",300),
+        "gimp_operation_timeout": c.get("gimp_operation_timeout",90),
+        "preview_render_timeout": c.get("preview_render_timeout",120),
+        "export_timeout": c.get("export_timeout",180),
+        "vision_timeout": c.get("vision_timeout",120),
+        "idle_watchdog_timeout": c.get("idle_watchdog_timeout",300),
+        "preview_every": c.get("preview_cadence_mutations",4),
+        "vision_review_every_batches": c.get("vision_review_every_batches",2),
+    }
+
 def _prompt_runner() -> PromptRunner:
-    return PromptRunner(jobs, providers.chat, _studio_tool_call)
+    return PromptRunner(jobs, providers.chat, _studio_tool_call, **_runner_options())
 
 def _mcp_prompt_runner(endpoint: str | None = None) -> PromptRunner:
     endpoint = endpoint or os.getenv("GIMP_MCP_ENDPOINT", "http://127.0.0.1:8000/mcp")
-    client = StudioMcpClient(endpoint, bearer_token=os.getenv("GIMP_MCP_AUTH_TOKEN", ""))
-    return PromptRunner(jobs, providers.chat, client.call_tool)
+    opts=_runner_options()
+    client = StudioMcpClient(endpoint, timeout=float(opts["gimp_operation_timeout"]), bearer_token=os.getenv("GIMP_MCP_AUTH_TOKEN", ""))
+    return PromptRunner(jobs, providers.chat, client.call_tool, **opts)
 
 
 @mcp.tool()

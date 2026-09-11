@@ -425,6 +425,17 @@ class ControlCenter(QMainWindow):
         w=QWidget(); form=QFormLayout(w); saved=CONTROL.load()
         self.preview_interval=QSpinBox(); self.preview_interval.setRange(250,5000); self.preview_interval.setValue(int(saved.get("preview_interval_ms",750)))
         self.preview_size=QSpinBox(); self.preview_size.setRange(256,3000); self.preview_size.setValue(int(saved.get("preview_max",1200)))
+        self.creative_budget=QComboBox(); self.creative_budget.addItems(["conservative","normal","extended","effectively_unlimited"]); self.creative_budget.setCurrentText(str(saved.get("creative_budget","effectively_unlimited")))
+        self.max_steps_batch=QSpinBox(); self.max_steps_batch.setRange(1,100); self.max_steps_batch.setValue(int(saved.get("max_steps_per_batch",20)))
+        self.provider_planning_timeout=QSpinBox(); self.provider_planning_timeout.setRange(10,3600); self.provider_planning_timeout.setSuffix(" s"); self.provider_planning_timeout.setValue(int(saved.get("provider_planning_timeout",600)))
+        self.provider_review_timeout=QSpinBox(); self.provider_review_timeout.setRange(10,3600); self.provider_review_timeout.setSuffix(" s"); self.provider_review_timeout.setValue(int(saved.get("provider_review_timeout",300)))
+        self.gimp_operation_timeout=QSpinBox(); self.gimp_operation_timeout.setRange(5,1800); self.gimp_operation_timeout.setSuffix(" s"); self.gimp_operation_timeout.setValue(int(saved.get("gimp_operation_timeout",90)))
+        self.preview_render_timeout=QSpinBox(); self.preview_render_timeout.setRange(5,1800); self.preview_render_timeout.setSuffix(" s"); self.preview_render_timeout.setValue(int(saved.get("preview_render_timeout",120)))
+        self.export_timeout=QSpinBox(); self.export_timeout.setRange(5,3600); self.export_timeout.setSuffix(" s"); self.export_timeout.setValue(int(saved.get("export_timeout",180)))
+        self.vision_timeout=QSpinBox(); self.vision_timeout.setRange(5,1800); self.vision_timeout.setSuffix(" s"); self.vision_timeout.setValue(int(saved.get("vision_timeout",120)))
+        self.idle_watchdog_timeout=QSpinBox(); self.idle_watchdog_timeout.setRange(10,86400); self.idle_watchdog_timeout.setSuffix(" s"); self.idle_watchdog_timeout.setValue(int(saved.get("idle_watchdog_timeout",300)))
+        self.preview_cadence=QSpinBox(); self.preview_cadence.setRange(1,1000); self.preview_cadence.setValue(int(saved.get("preview_cadence_mutations",4)))
+        self.vision_cadence=QSpinBox(); self.vision_cadence.setRange(0,1000); self.vision_cadence.setSpecialValueText("Disabled"); self.vision_cadence.setValue(int(saved.get("vision_review_every_batches",2)))
         self.update_on_start=QCheckBox("Check GIMP and GIMP MCP updates on startup"); self.update_on_start.setChecked(bool(saved.get("check_updates_on_start",True)))
         self.network_enabled=QCheckBox("Allow external MCP clients on the network"); self.network_enabled.setChecked(bool(saved.get("mcp_network_enabled",False)))
         self.network_host=QLineEdit(str(saved.get("mcp_network_host","0.0.0.0")))
@@ -438,6 +449,17 @@ class ControlCenter(QMainWindow):
         actions=QHBoxLayout(); actions.addWidget(save); actions.addWidget(reconfigure); actions.addStretch(); action_wrap=QWidget(); action_wrap.setLayout(actions)
         form.addRow("Live preview interval (ms)", self.preview_interval)
         form.addRow("Preview max size", self.preview_size)
+        form.addRow("Creative budget", self.creative_budget)
+        form.addRow("Max steps per batch", self.max_steps_batch)
+        form.addRow("Provider planning timeout", self.provider_planning_timeout)
+        form.addRow("Provider review timeout", self.provider_review_timeout)
+        form.addRow("GIMP operation timeout", self.gimp_operation_timeout)
+        form.addRow("Preview render timeout", self.preview_render_timeout)
+        form.addRow("Export timeout", self.export_timeout)
+        form.addRow("Vision timeout", self.vision_timeout)
+        form.addRow("Idle progress watchdog", self.idle_watchdog_timeout)
+        form.addRow("Preview every N mutations", self.preview_cadence)
+        form.addRow("Vision review every N batches", self.vision_cadence)
         form.addRow(self.update_on_start)
         form.addRow(self.network_enabled)
         form.addRow("Network bind address", self.network_host)
@@ -456,6 +478,17 @@ class ControlCenter(QMainWindow):
         data.update({
             "preview_interval_ms":self.preview_interval.value(),
             "preview_max":self.preview_size.value(),
+            "creative_budget":self.creative_budget.currentText(),
+            "max_steps_per_batch":self.max_steps_batch.value(),
+            "provider_planning_timeout":self.provider_planning_timeout.value(),
+            "provider_review_timeout":self.provider_review_timeout.value(),
+            "gimp_operation_timeout":self.gimp_operation_timeout.value(),
+            "preview_render_timeout":self.preview_render_timeout.value(),
+            "export_timeout":self.export_timeout.value(),
+            "vision_timeout":self.vision_timeout.value(),
+            "idle_watchdog_timeout":self.idle_watchdog_timeout.value(),
+            "preview_cadence_mutations":self.preview_cadence.value(),
+            "vision_review_every_batches":self.vision_cadence.value(),
             "check_updates_on_start":self.update_on_start.isChecked(),
             "mcp_network_enabled":network,
             "mcp_network_host":self.network_host.text().strip() or "0.0.0.0",
@@ -652,8 +685,9 @@ class ControlCenter(QMainWindow):
         try:
             from gimp_mcp.studio_mcp_client import StudioMcpClient
             endpoint=os.getenv("GIMP_MCP_ENDPOINT", "http://127.0.0.1:8000/mcp")
-            client=StudioMcpClient(endpoint, bearer_token=os.getenv("GIMP_MCP_AUTH_TOKEN", ""))
-            response=client.call_tool("export_artwork", {"session_id":sid,"output_path":target,"format":fmt,"overwrite":True})
+            export_timeout=int(CONTROL.load().get("export_timeout",180))
+            client=StudioMcpClient(endpoint, timeout=export_timeout, bearer_token=os.getenv("GIMP_MCP_AUTH_TOKEN", ""))
+            response=client.call_tool("export_artwork", {"session_id":sid,"output_path":target,"format":fmt,"overwrite":True,"__timeout_seconds":export_timeout})
             if not isinstance(response,dict) or response.get("ok") is False:
                 raise RuntimeError((response.get("error") or {}).get("message") if isinstance(response,dict) and isinstance(response.get("error"),dict) else str(response))
             result=response.get("data") if isinstance(response.get("data"),dict) else response

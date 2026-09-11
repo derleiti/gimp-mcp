@@ -55,7 +55,7 @@ class GimpBridge:
 
     def run_json(self, body: str, *, timeout: int | None = None) -> Any:
         marker = "__GIMP_MCP_JSON__"
-        code = "import json, sys\nfrom gi.repository import Gimp, Gegl, Gio\n" + body + f"\nprint('{marker}' + json.dumps(result, ensure_ascii=False))\n"
+        code = "import json, sys, os\nfrom gi.repository import Gimp, Gegl, Gio\n" + body + f"\nprint('{marker}' + json.dumps(result, ensure_ascii=False))\n"
         res = self.run_python(code, timeout=timeout)
         for line in reversed(res.stdout.splitlines()):
             if line.startswith(marker):

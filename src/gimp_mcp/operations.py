@@ -326,5 +326,30 @@ class GimpOperations:
     def pdb_search(self, query: str, limit: int) -> dict[str, Any]:
         return self.bridge.run_json(f"q={_q(query.lower())};limit={max(1,min(limit,500))}\npdb=Gimp.get_pdb();names=list(pdb.query_procedures('.*','.*','.*','.*','.*','.*','.*','.*'));items=[n for n in names if q in n.lower()];result={{'count':len(items),'procedures':items[:limit]}}\n")
 
+    def pdb_call(self, s: ArtworkSession, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Call a GIMP PDB procedure with JSON-safe arguments and session image/layer references."""
+        if not isinstance(arguments, dict):
+            raise GimpMcpError('INVALID_ARGUMENT', 'arguments must be an object', False)
+        body = _load(s.document) + f"name={_q(name)};args=json.loads({_q(json.dumps(arguments, ensure_ascii=False))});session_root={_q(s.workdir.resolve())}\n"
+        body += "pdb=Gimp.get_pdb();proc=pdb.lookup_procedure(name)\nif proc is None: raise RuntimeError('PDB_PROCEDURE_NOT_FOUND:'+name)\nconfig=proc.create_config();specs={x.name:x for x in proc.get_arguments()}\n"
+        body += "unknown=sorted(set(args)-set(specs))\nif unknown: raise RuntimeError('UNKNOWN_PDB_ARGUMENTS:'+','.join(unknown))\n"
+        body += (
+            "for key,value in args.items():\n"
+            " spec=specs[key];tn=spec.value_type.name\n"
+            " if tn=='GimpImage': value=img\n"
+            " elif tn in ('GimpDrawable','GimpLayer','GimpItem'):\n"
+            "  lid=int(value);value=next((x for x in img.get_layers() if int(x.get_tattoo())==lid),None)\n"
+            "  if value is None: raise RuntimeError('LAYER_NOT_FOUND:'+str(lid))\n"
+            " elif tn=='GFile':\n"
+            "  candidate=os.path.realpath(os.path.expanduser(str(value)))\n"
+            "  if os.path.commonpath([session_root,candidate]) != session_root: raise RuntimeError('PDB_GFILE_OUTSIDE_SESSION_WORKDIR')\n"
+            "  value=Gio.File.new_for_path(candidate)\n"
+            " elif tn=='GimpRunMode': value=getattr(Gimp.RunMode,str(value).upper(),Gimp.RunMode.NONINTERACTIVE)\n"
+            " config.set_property(key,value)\n"
+        )
+        body += "ret=proc.run(config);vals=[]\nfor i in range(ret.length()):\n v=ret.index(i);vals.append(v if isinstance(v,(str,int,float,bool,type(None))) else str(v))\n"
+        body += _save(s.document) + "result={'procedure':name,'returns':vals}\nimg.delete()\n"
+        return self._mutate(s, body)
+
     def pdb_describe(self, name: str) -> dict[str, Any]:
         return self.bridge.run_json(f"name={_q(name)}\npdb=Gimp.get_pdb();proc=pdb.lookup_procedure(name)\nif proc is None: result={{'found':False,'name':name}}\nelse:\n args=[{{'name':s.name,'type':s.value_type.name,'blurb':getattr(s,'blurb','')}} for s in proc.get_arguments()]\n rets=[{{'name':s.name,'type':s.value_type.name,'blurb':getattr(s,'blurb','')}} for s in proc.get_return_values()]\n result={{'found':True,'name':name,'arguments':args,'returns':rets}}\n")

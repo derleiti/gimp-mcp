@@ -41,3 +41,9 @@ def test_status_removes_stale_unix_socket(tmp_path):
     assert status['ok'] is False
     assert status.get('stale_socket_removed') is True
     assert not path.exists()
+
+
+def test_explicit_bridge_never_autostarts_headless(tmp_path: Path):
+    bridge = LiveBridge(tmp_path / 'missing.sock', timeout=0.05)
+    assert bridge.headless is None
+    assert bridge.status()['ok'] is False

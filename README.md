@@ -173,3 +173,36 @@ GIMP MCP can expose a lightweight visual feedback loop for MCP-capable AI client
 - `gimp-vision-meta://<session_id>` - structured canvas and layer geometry matching the overlay.
 
 The coordinate contract follows GIMP/XCF canvas coordinates: `(0,0)` is the top-left of the image canvas, X increases right, Y increases down, and layer offsets may be outside the canvas. The overlay is never written into the artwork. When the persistent live plug-in supports `vision_snapshot`, the capture comes from the visible GIMP image; otherwise the current session XCF is rendered as a safe fallback. ImageMagick (`magick` or `convert`) is required for overlay/GIF rendering.
+
+## Headless creative workspaces and multi-worker AI
+
+GIMP MCP prefers the normal visible GIMP 3 persistent bridge. If no visible GIMP
+bridge is reachable, it now lazily starts a private `gimp -n -i` GIMP 3 process
+and invokes the installed persistent `plug-in-gimp-mcp-live` procedure through
+GIMP's official Python/PDB batch interpreter. The headless process keeps real
+GIMP images open and can render `vision_snapshot` PNGs, so an AI can inspect the
+same canvas it is editing without an X11/Wayland display.
+
+For concurrent agents, `GIMP_MCP_HEADLESS_WORKERS` controls a bounded pool
+(default `2`, maximum `8`). Artwork paths are deterministically assigned to a
+worker, allowing different sessions to execute concurrently while every
+session document is protected by a thread-reentrant **and process-wide** file
+lock. Multiple LLM/MCP clients may therefore share the service without writing
+the same XCF concurrently.
+
+Useful expert tools:
+
+- `headless_workspace_status` — visible/headless mode and worker health.
+- `pdb_search` / `pdb_describe` — discover GIMP's installed Procedure Database.
+- `pdb_call` — call a discovered PDB procedure with JSON-safe values against an
+  artwork session. Image arguments bind to the session; layer/drawable/item
+  arguments use MCP `layer_id` tattoos. Generic `GFile` arguments are confined
+  to the session work directory; normal import/export should use the dedicated
+  safe MCP tools.
+- `filter_list` / `filter_describe` / `filter_apply` — GEGL discovery and
+  non-destructive `Gimp.DrawableFilter` editing.
+- `vision_capture` plus `gimp-vision://`, `gimp-vision-meta://` and
+  `gimp-timeline://` — coordinate-aware visual feedback for models.
+
+The headless pool is a fallback, not a replacement for interactive GIMP. If a
+visible bridge appears, new bridge requests prefer it automatically.
