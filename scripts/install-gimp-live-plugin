@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+ROOT="${GIMP_MCP_ROOT:-$HOME/gimp-mcp}"
+GIMP_DIR="${GIMP3_DIRECTORY:-$HOME/.config/GIMP/3.2}"
+DEST="$GIMP_DIR/plug-ins/gimp-mcp-live"
+mkdir -p "$DEST"
+install -m 755 "$ROOT/plugins/gimp-mcp-live/gimp-mcp-live.py" "$DEST/gimp-mcp-live.py"
+printf 'Installed GIMP MCP live plug-in to %s\nRestart GIMP once; the persistent bridge then starts automatically.\n' "$DEST"

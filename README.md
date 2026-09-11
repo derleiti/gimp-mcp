@@ -123,3 +123,23 @@ Launch `./scripts/gimp-mcp-control` and open **Setup / Updates**. The studio can
 - run pytest plus a real GIMP bridge probe.
 
 The updater distinguishes **distribution candidate** from **upstream latest**. It does not silently replace distro packages with foreign repositories.
+
+## Persistent visible GIMP mode (0.3)
+
+Install the bundled GIMP 3 persistent plug-in:
+
+```bash
+./scripts/install-gimp-live-plugin
+```
+
+Restart GIMP once. The plug-in starts automatically as a `PERSISTENT` GIMP procedure and creates a user-only Unix socket at:
+
+```text
+~/.local/state/gimp-mcp/gimp-live.sock
+```
+
+When the socket is available, successful MCP document mutations are mirrored into a visible GIMP display. If GIMP is closed or the live plug-in is unavailable, GIMP MCP falls back to the crash-isolated batch workflow automatically.
+
+The first live implementation is deliberately a **visible document mirror**, not remote arbitrary Python execution. Direct in-process semantic editing is the next refinement.
+
+See `docs/CREATIVE_AI_CLOUD.md` for the shared multi-application direction, including a proposed FL Studio MCP adapter.

@@ -10,6 +10,7 @@ from pathlib import Path
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QPixmap
 from gimp_mcp.control_settings import ControlSettings
+from gimp_mcp.live_bridge import LiveBridge
 from gimp_mcp.setup_manager import SetupManager
 
 from PyQt6.QtWidgets import (
@@ -45,7 +46,8 @@ class ControlCenter(QMainWindow):
         left=QVBoxLayout(); right=QVBoxLayout()
         self.sessions=QListWidget(); self.sessions.currentTextChanged.connect(self._session_changed)
         self.log=QTextEdit(); self.log.setReadOnly(True)
-        left.addWidget(QLabel("Artwork sessions")); left.addWidget(self.sessions,1); left.addWidget(QLabel("Live operations")); left.addWidget(self.log,2)
+        self.live_bridge_label=QLabel('GIMP Live Bridge: checking...')
+        left.addWidget(self.live_bridge_label); left.addWidget(QLabel("Artwork sessions")); left.addWidget(self.sessions,1); left.addWidget(QLabel("Live operations")); left.addWidget(self.log,2)
         self.preview=QLabel("No preview yet"); self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.preview.setMinimumSize(520,420)
         right.addWidget(QLabel("Live preview")); right.addWidget(self.preview,1)
         outer.addLayout(left,1); outer.addLayout(right,2); return w
@@ -54,9 +56,12 @@ class ControlCenter(QMainWindow):
         w=QWidget(); v=QVBoxLayout(w)
         self.server_status=QLabel(); row=QHBoxLayout();
         start=QPushButton("Start MCP Server"); stop=QPushButton("Stop MCP Server"); start.clicked.connect(self.start_server); stop.clicked.connect(self.stop_server)
-        row.addWidget(start); row.addWidget(stop); row.addStretch()
+        live_install=QPushButton('Install / Update GIMP Live Plug-in'); live_install.clicked.connect(self.install_live_plugin)
+        row.addWidget(start); row.addWidget(stop); row.addWidget(live_install); row.addStretch()
         self.endpoint=QLineEdit("http://127.0.0.1:8000/mcp"); self.endpoint.setReadOnly(True)
-        v.addWidget(self.server_status); v.addLayout(row); v.addWidget(QLabel("Streamable HTTP endpoint")); v.addWidget(self.endpoint); v.addStretch(); return w
+        v.addWidget(self.server_status); v.addLayout(row); v.addWidget(QLabel("Streamable HTTP endpoint")); v.addWidget(self.endpoint)
+        v.addWidget(QLabel('Live GIMP mode: install the plug-in once, then restart GIMP. When connected, successful MCP edits are mirrored into the visible GIMP display.'))
+        v.addStretch(); return w
 
     def _ai_tab(self):
         w=QWidget(); v=QVBoxLayout(w)
@@ -157,6 +162,15 @@ class ControlCenter(QMainWindow):
             except ProcessLookupError: pass
         PIDFILE.unlink(missing_ok=True); self.refresh()
 
+    def install_live_plugin(self):
+        script=Path.home()/"gimp-mcp/scripts/install-gimp-live-plugin"
+        try:
+            r=subprocess.run([str(script)],capture_output=True,text=True,timeout=30,check=False)
+            text=((r.stdout or '')+(r.stderr or '')).strip()
+            QMessageBox.information(self,'GIMP Live Plug-in',text or 'Installation finished. Restart GIMP once.')
+        except Exception as exc:
+            QMessageBox.critical(self,'GIMP Live Plug-in',str(exc))
+
     def provider_status(self):
         provider=self.provider.currentText()
         if provider == "triforce":
@@ -195,6 +209,11 @@ class ControlCenter(QMainWindow):
 
     def refresh(self):
         pid=self._server_pid(); self.server_status.setText(f"Server: {'RUNNING pid='+str(pid) if pid else 'STOPPED'}")
+        live=LiveBridge(timeout=0.25).status()
+        if live.get('ok'):
+            self.live_bridge_label.setText(f"GIMP Live Bridge: CONNECTED · GIMP {live.get('gimp_version','?')}")
+        else:
+            self.live_bridge_label.setText('GIMP Live Bridge: OFFLINE · batch/preview mode')
         current=self.sessions.currentItem().text() if self.sessions.currentItem() else ""
         ids=sorted([p.name for p in SESSIONS.iterdir() if p.is_dir() and (p/'document.xcf').exists()]) if SESSIONS.exists() else []
         if [self.sessions.item(i).text() for i in range(self.sessions.count())] != ids:

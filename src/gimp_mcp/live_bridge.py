@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+import json
+import os
+import socket
+from pathlib import Path
+from typing import Any
+
+
+class LiveBridge:
+    def __init__(self, socket_path: Path | None = None, timeout: float = 2.0) -> None:
+        self.socket_path = socket_path or Path(os.environ.get(
+            'GIMP_MCP_LIVE_SOCKET', str(Path.home() / '.local/state/gimp-mcp/gimp-live.sock')
+        ))
+        self.timeout = timeout
+
+    def request(self, command: str, **payload: Any) -> dict[str, Any]:
+        request = {'command': command, **payload}
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(self.timeout)
+            sock.connect(str(self.socket_path))
+            sock.sendall((json.dumps(request, ensure_ascii=False) + '\n').encode('utf-8'))
+            data = b''
+            while b'\n' not in data and len(data) < 1024 * 1024:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        if not data:
+            raise RuntimeError('live bridge returned no data')
+        return json.loads(data.split(b'\n', 1)[0].decode('utf-8'))
+
+    def available(self) -> bool:
+        return self.socket_path.exists()
+
+    def status(self) -> dict[str, Any]:
+        try:
+            return self.request('ping')
+        except Exception as exc:
+            return {'ok': False, 'mode': 'batch', 'error': str(exc), 'socket': str(self.socket_path)}
+
+    def show_document(self, path: Path) -> dict[str, Any]:
+        return self.request('show_document', path=str(path))
+
+    def mirror_if_available(self, path: Path) -> dict[str, Any] | None:
+        if not self.available():
+            return None
+        try:
+            return self.show_document(path)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}

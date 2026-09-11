@@ -12,16 +12,18 @@ from .ai_control import AICoderAdapter, AIControlError
 from .operations import GimpOperations
 from .security import PathPolicy
 from .sessions import SessionManager
+from .live_bridge import LiveBridge
 
 settings = Settings()
 policy = PathPolicy(settings.allowed_roots)
 bridge = GimpBridge(settings.gimp_executable, settings.timeout)
 sessions = SessionManager(settings.session_root)
 ops = GimpOperations(bridge, sessions)
+live_bridge = LiveBridge()
 events = EventBus(settings.state_dir / "events.jsonl")
 ai_control = AICoderAdapter()
 
-mcp = MCPServer('GIMP MCP', version='0.2.0', instructions='Structured GIMP 3 artwork editing. Create/open a session first, use semantic tools, render previews to inspect progress, and use filter_list/filter_describe before unfamiliar GEGL effects.')
+mcp = MCPServer('GIMP MCP', version='0.3.0', instructions='Structured GIMP 3 artwork editing. Create/open a session first, use semantic tools, render previews to inspect progress, and use filter_list/filter_describe before unfamiliar GEGL effects.')
 
 
 def _ok(data: Any) -> dict[str, Any]:
@@ -49,6 +51,11 @@ def _call(fn, *args, **kwargs):
 def gimp_status() -> dict[str, Any]:
     '''Verify the real GIMP binary, Python GI bridge and PDB availability. Read-only. Use this first when diagnosing setup problems.'''
     return _call(bridge.probe)
+
+@mcp.tool()
+def live_bridge_status() -> dict[str, Any]:
+    '''Return whether the persistent visible GIMP bridge is connected. When connected, successful edits are mirrored into an open GIMP display.'''
+    return _ok(live_bridge.status())
 
 @mcp.tool()
 def session_list() -> dict[str, Any]:

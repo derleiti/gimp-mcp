@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from .bridge import GimpBridge
 from .errors import GimpMcpError
+from .live_bridge import LiveBridge
 from .sessions import ArtworkSession, SessionManager
 
 
@@ -23,12 +24,18 @@ def _layer_lookup(layer_id: int) -> str:
 class GimpOperations:
     def __init__(self, bridge: GimpBridge, sessions: SessionManager) -> None:
         self.bridge, self.sessions = bridge, sessions
+        self.live = LiveBridge()
+
+    def _mirror(self, s: ArtworkSession) -> None:
+        self.live.mirror_if_available(s.document)
 
     def _mutate(self, s: ArtworkSession, body: str) -> Any:
         with s.lock:
             snap = self.sessions.snapshot(s)
             try:
-                return self.bridge.run_json(body)
+                result = self.bridge.run_json(body)
+                self._mirror(s)
+                return result
             except Exception:
                 self.sessions.rollback_failed(s, snap)
                 raise
@@ -37,13 +44,15 @@ class GimpOperations:
         if not (1 <= width <= 20000 and 1 <= height <= 20000):
             raise GimpMcpError('INVALID_ARGUMENT', 'width and height must be within 1..20000', False)
         tattoo = random.randint(100000, 2_000_000_000)
-        return self.bridge.run_json(
+        result = self.bridge.run_json(
             f"w={width};h={height};name={_q(name)};tattoo={tattoo}\n"
             "img=Gimp.Image.new(w,h,Gimp.ImageBaseType.RGB)\n"
             "layer=Gimp.Layer.new(img,name,w,h,Gimp.ImageType.RGBA_IMAGE,100.0,Gimp.LayerMode.NORMAL)\n"
             "img.insert_layer(layer,None,0);layer.fill(Gimp.FillType.TRANSPARENT);layer.set_tattoo(tattoo)\n"
             + _save(s.document)
             + "result={'width':w,'height':h,'layer_id':tattoo,'layer_name':name}\nimg.delete()\n")
+        self._mirror(s)
+        return result
 
     def document_info(self, s: ArtworkSession) -> dict[str, Any]:
         return self.bridge.run_json(_load(s.document) + "layers=img.get_layers()\nresult={'width':img.get_width(),'height':img.get_height(),'layer_count':len(layers),'layers':[{'layer_id':int(x.get_tattoo()),'name':x.get_name(),'width':x.get_width(),'height':x.get_height(),'visible':x.get_visible(),'opacity':x.get_opacity()} for x in layers]}\nimg.delete()\n")
