@@ -59,6 +59,53 @@ def test_runner_repairs_bad_model_output(tmp_path: Path):
     assert result.status == "completed"
 
 
+def test_runner_repairs_toolless_followup_batch_without_replaying_completed_work(tmp_path: Path):
+    jobs = JobManager(tmp_path / "jobs")
+    responses = iter([
+        json.dumps({"goal":"base","outcome":"continue","summary":"base done","steps":[
+            {"tool":"layer_create","arguments":{"name":"Base"},"reason":"base"}
+        ]}),
+        json.dumps({"goal":"detail","outcome":"continue","summary":"bad","steps":[
+            {"arguments":{"name":"Broken"},"reason":"missing tool"}
+        ]}),
+        json.dumps({"goal":"detail","outcome":"done","summary":"fixed","steps":[
+            {"tool":"layer_create","arguments":{"name":"Detail"},"reason":"detail"}
+        ]}),
+    ])
+    prompts=[]; created=[]
+    def ai_chat(**kwargs):
+        prompts.append(kwargs["message"]); return next(responses)
+    def tool_call(name,args):
+        if name == "session_create": return {"ok":True,"data":{"session_id":"s1","layer_id":1}}
+        if name == "layer_create":
+            created.append(args["name"]); return {"ok":True,"data":{"layer_id":len(created)+1}}
+        if name == "session_info": return {"ok":True,"data":{"width":100,"height":100,"layers":[]}}
+        return {"ok":True,"data":{}}
+    job=PromptRunner(jobs,ai_chat,tool_call,repair_attempts=1,vision_review_every_batches=0).run(jobs.create("art","triforce","m"))
+    assert job.status == "completed"
+    assert created == ["Base", "Detail"]
+    assert len(prompts) == 3
+    assert "PREVIOUS BATCH WAS REJECTED BEFORE EXECUTION" in prompts[2]
+    assert "non-empty allowed `tool`" in prompts[2]
+    assert job.error is None
+
+
+def test_runner_retries_provider_timeout_without_mislabeling_as_schema_repair(tmp_path: Path):
+    jobs=JobManager(tmp_path/'jobs'); calls=[]
+    def ai_chat(**kwargs):
+        calls.append(kwargs['message'])
+        if len(calls) == 1: raise TimeoutError('slow provider')
+        return json.dumps({'goal':'x','outcome':'done','steps':[]})
+    def tool_call(name,args):
+        if name=='session_create': return {'ok':True,'data':{'session_id':'s1'}}
+        return {'ok':True,'data':{}}
+    job=PromptRunner(jobs,ai_chat,tool_call,repair_attempts=1,vision_review_every_batches=0).run(jobs.create('art','triforce','m'))
+    assert job.status == 'completed'
+    assert len(calls) == 2
+    assert 'PREVIOUS BATCH WAS REJECTED' not in calls[1]
+    assert job.error is None
+
+
 def test_runner_propagates_batch_mode(tmp_path: Path):
     jobs = JobManager(tmp_path / "jobs")
     calls = []

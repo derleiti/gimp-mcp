@@ -36,3 +36,33 @@ def test_codex_mcp_disable_args_from_config(tmp_path, monkeypatch):
     args = ProviderManager._codex_mcp_disable_args()
     assert "mcp_servers.alpha.enabled=false" in args
     assert "mcp_servers.beta.enabled=false" in args
+
+
+def test_triforce_config_reuses_local_aicoder_session_when_env_missing(monkeypatch, tmp_path):
+    import json
+    from gimp_mcp.provider_manager import ProviderManager
+    monkeypatch.delenv("GIMP_MCP_TRIFORCE_TOKEN", raising=False)
+    monkeypatch.delenv("GIMP_MCP_TRIFORCE_URL", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = tmp_path / ".config" / "ai-coder"
+    config.mkdir(parents=True)
+    (config / "session.json").write_text(json.dumps({"base_url":"https://api.ailinux.me", "token":"account-token"}))
+    assert ProviderManager._triforce_config() == ("https://api.ailinux.me", "account-token")
+
+
+def test_triforce_config_env_token_has_priority(monkeypatch, tmp_path):
+    from gimp_mcp.provider_manager import ProviderManager
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GIMP_MCP_TRIFORCE_URL", "https://example.invalid/")
+    monkeypatch.setenv("GIMP_MCP_TRIFORCE_TOKEN", "explicit-token")
+    assert ProviderManager._triforce_config() == ("https://example.invalid", "explicit-token")
+
+
+def test_triforce_models_normalizes_string_catalog(monkeypatch):
+    from gimp_mcp.provider_manager import ProviderManager
+    manager = ProviderManager()
+    monkeypatch.setattr(manager, "_triforce_request", lambda *a, **k: {"models": ["openai/test", {"id":"other/test", "name":"Other"}]})
+    rows = manager.triforce_models()
+    assert rows[0]["model"] == "openai/test"
+    assert rows[0]["id"] == "openai/test"
+    assert rows[1]["model"] == "other/test"

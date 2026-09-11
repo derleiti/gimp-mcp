@@ -364,14 +364,34 @@ class PromptRunner:
                 plan=None; last_error=""
                 for attempt in range(self.repair_attempts+1):
                     try:
-                        plan=self._ask_plan(job, request if not last_error else request+"\nPrevious batch error: "+last_error+"\nReturn corrected JSON only.")
+                        repair_request = request
+                        if last_error:
+                            repair_request += (
+                                "\n\nYOUR PREVIOUS BATCH WAS REJECTED BEFORE EXECUTION. "
+                                "Do not repeat it verbatim. Repair the schema/arguments and return one complete JSON object only. "
+                                "Every steps[] entry MUST be an object containing a non-empty allowed `tool` string and an `arguments` object. "
+                                "Do not emit prose, placeholders, null steps, tool-less steps, or pseudo-actions. "
+                                "Validation error: " + last_error
+                            )
+                        plan=self._ask_plan(job, repair_request)
                         break
-                    except (PlanError, TimeoutError) as exc:
+                    except PlanError as exc:
                         last_error=str(exc)
                         self.jobs.update(job,error=last_error)
                         if attempt>=self.repair_attempts: raise
                         self.jobs.checkpoint(job.job_id)
+                    except TimeoutError as exc:
+                        # Transient provider timeouts may recover on the bounded retry budget.
+                        # Keep them distinct from schema repair: retry the original request,
+                        # preserve the same session, and never describe a timeout as bad JSON.
+                        last_error = ""
+                        self.jobs.update(job,error=str(exc))
+                        if attempt>=self.repair_attempts: raise
+                        self.jobs.checkpoint(job.job_id)
                 if plan is None: raise PlanError(last_error or "model did not return a usable batch")
+                # A successfully repaired plan clears the transient validation error.
+                if last_error:
+                    self.jobs.update(job,error=None)
                 signature=self._plan_signature(plan)
                 mutations=self._execute_batch(job,plan,refs)
                 vision_note=self._vision_review(job)

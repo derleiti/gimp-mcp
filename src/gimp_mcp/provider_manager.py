@@ -379,10 +379,28 @@ class ProviderManager:
             raise ProviderError((r.stderr or r.stdout).strip() or "Logout failed")
         return {"provider": provider, "connected": False}
 
-    # TriForce is independent too: optional explicit GIMP-MCP environment, never AICoder state.
+    # TriForce credentials are explicit GIMP-MCP configuration.  When Studio is
+    # started by the same authenticated AILinux desktop user, reuse the local
+    # AICoder account session as a compatibility fallback instead of requiring
+    # the user to paste the same bearer token into another application.
     @staticmethod
     def _triforce_config() -> tuple[str, str]:
-        return os.getenv("GIMP_MCP_TRIFORCE_URL", "https://api.ailinux.me").rstrip("/"), os.getenv("GIMP_MCP_TRIFORCE_TOKEN", "")
+        base = os.getenv("GIMP_MCP_TRIFORCE_URL", "https://api.ailinux.me").rstrip("/")
+        token = os.getenv("GIMP_MCP_TRIFORCE_TOKEN", "").strip()
+        if token:
+            return base, token
+        session_path = Path.home() / ".config" / "ai-coder" / "session.json"
+        try:
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return base, ""
+        if not isinstance(session, dict):
+            return base, ""
+        account_base = str(session.get("base_url") or "").rstrip("/")
+        account_token = str(session.get("token") or "").strip()
+        if account_base:
+            base = account_base
+        return base, account_token
 
     def triforce_status(self) -> dict[str, Any]:
         base, token = self._triforce_config()
@@ -406,7 +424,27 @@ class ProviderManager:
     def triforce_models(self) -> list[dict[str, Any]]:
         data = self._triforce_request("GET", "/v1/client/models")
         rows = data if isinstance(data, list) else data.get("models", [])
-        return list(rows) if isinstance(rows, list) else []
+        if not isinstance(rows, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in rows:
+            if isinstance(item, str):
+                model = item.strip()
+                if model:
+                    normalized.append({"provider": "triforce", "model": model, "id": model, "display": model})
+                continue
+            if not isinstance(item, dict):
+                continue
+            model = str(item.get("model") or item.get("id") or item.get("name") or "").strip()
+            if not model:
+                continue
+            row = dict(item)
+            row.setdefault("provider", "triforce")
+            row.setdefault("model", model)
+            row.setdefault("id", model)
+            row.setdefault("display", str(item.get("display_name") or item.get("name") or model))
+            normalized.append(row)
+        return normalized
 
     def _triforce_chat(self, model: str, message: str, system_prompt: str, *, timeout: int | None = None) -> str:
         data = self._triforce_request("POST", "/v1/client/chat", {
