@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import logging, shutil, time
+import hmac, logging, os, shutil, time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 from mcp.server import MCPServer
+from mcp.server.auth.provider import AccessToken
+from mcp.server.auth.settings import AuthSettings
 from .bridge import GimpBridge
 from .config import Settings
 from .errors import GimpMcpError
@@ -30,7 +32,36 @@ events = EventBus(settings.state_dir / "events.jsonl")
 providers = ProviderManager()
 jobs = JobManager(settings.state_dir / "jobs")
 
-mcp = MCPServer('GIMP MCP', version='0.4.0', instructions='Structured GIMP 3 artwork editing. Create/open a session first, use semantic tools, render previews to inspect progress, and use filter_list/filter_describe before unfamiliar GEGL effects.')
+class _StaticTokenVerifier:
+    def __init__(self, expected: str) -> None:
+        self.expected = expected
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if self.expected and hmac.compare_digest(token, self.expected):
+            return AccessToken(token=token, client_id="gimp-mcp-network", scopes=["gimp:control"])
+        return None
+
+
+def _build_mcp() -> MCPServer:
+    kwargs: dict[str, Any] = {}
+    auth_token = os.getenv("GIMP_MCP_AUTH_TOKEN", "").strip()
+    if auth_token:
+        public_url = os.getenv("GIMP_MCP_RESOURCE_URL", "http://127.0.0.1:8000/mcp").strip()
+        kwargs["token_verifier"] = _StaticTokenVerifier(auth_token)
+        kwargs["auth"] = AuthSettings(
+            issuer_url="https://api.ailinux.me",
+            resource_server_url=public_url,
+            required_scopes=["gimp:control"],
+            validate_token_resource=False,
+        )
+    return MCPServer(
+        "GIMP MCP", version="0.4.0",
+        instructions="Structured GIMP 3 artwork editing. Prefer the connected live GIMP workspace; batch sessions are a fallback for tests and recovery.",
+        **kwargs,
+    )
+
+
+mcp = _build_mcp()
 
 
 def _ok(data: Any) -> dict[str, Any]:
@@ -301,8 +332,9 @@ def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 def _prompt_runner() -> PromptRunner:
     return PromptRunner(jobs, providers.chat, _studio_tool_call)
 
-def _mcp_prompt_runner(endpoint: str = "http://127.0.0.1:8000/mcp") -> PromptRunner:
-    client = StudioMcpClient(endpoint)
+def _mcp_prompt_runner(endpoint: str | None = None) -> PromptRunner:
+    endpoint = endpoint or os.getenv("GIMP_MCP_ENDPOINT", "http://127.0.0.1:8000/mcp")
+    client = StudioMcpClient(endpoint, bearer_token=os.getenv("GIMP_MCP_AUTH_TOKEN", ""))
     return PromptRunner(jobs, providers.chat, client.call_tool)
 
 

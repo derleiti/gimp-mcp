@@ -251,6 +251,7 @@ name = "gimp-mcp"
 version = "0.4.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx2" },
     { name = "mcp", extra = ["cli"] },
     { name = "pyqt6" },
 ]
@@ -262,6 +263,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx2", specifier = ">=2.12,<3" },
     { name = "mcp", extras = ["cli"], specifier = ">=2,<3" },
     { name = "pyqt6", specifier = ">=6.7,<7" },
 ]

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -152,16 +154,105 @@ class SetupManager:
             result["git"] = {"error": str(exc)}
         return result
 
+
+    def installed_gimp_version(self, executable: str | None = None) -> str | None:
+        exe = executable or shutil.which("gimp") or "/usr/bin/gimp"
+        try:
+            r = _run([str(exe), "--version"], timeout=15)
+            text = (r.stdout or r.stderr or "").strip()
+            m = re.search(r"(?:GIMP|Program Version)\s+(\d+\.\d+\.\d+)", text, re.I)
+            return m.group(1) if m else None
+        except Exception:
+            return None
+
+    def latest_gimp_release(self) -> dict[str, Any]:
+        releases = _fetch_json("https://gitlab.gnome.org/api/v4/projects/GNOME%2Fgimp/releases?per_page=10", timeout=15)
+        for item in releases if isinstance(releases, list) else []:
+            name = str(item.get("name") or "")
+            m = re.search(r"GIMP\s+(3\.\d+\.\d+)$", name, re.I)
+            if m:
+                version = m.group(1)
+                arch = platform.machine().lower()
+                app_arch = "aarch64" if arch in {"aarch64", "arm64"} else "x86_64"
+                series = ".".join(version.split(".")[:2])
+                filename = f"GIMP-{version}-{app_arch}.AppImage"
+                base = f"https://download.gimp.org/gimp/v{series}/linux"
+                return {"version": version, "arch": app_arch, "filename": filename, "url": f"{base}/{filename}", "checksums_url": f"{base}/SHA256SUMS", "source": "official-gimp"}
+        raise RuntimeError("Could not determine the current stable GIMP release from the official GNOME release feed")
+
+    def managed_gimp_status(self) -> dict[str, Any]:
+        release = self.latest_gimp_release()
+        current = self.installed_gimp_version()
+        managed = Path.home() / ".local/share/gimp-mcp/runtime/gimp.AppImage"
+        managed_version = self.installed_gimp_version(str(managed)) if managed.exists() else None
+        return {"system_version": current, "managed_version": managed_version, "latest_version": release["version"], "managed_path": str(managed), "update_available": (managed_version or current) != release["version"], "release": release}
+
+    def install_latest_gimp_appimage(self, progress: Any | None = None) -> dict[str, Any]:
+        release = self.latest_gimp_release()
+        checksums = _fetch_text(release["checksums_url"], timeout=20)
+        expected = None
+        for line in checksums.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[-1].lstrip("*") == release["filename"]:
+                expected = parts[0].lower(); break
+        if not expected:
+            raise RuntimeError("Official SHA256 checksum for the GIMP AppImage was not found")
+        runtime = Path.home() / ".local/share/gimp-mcp/runtime"
+        runtime.mkdir(parents=True, exist_ok=True)
+        versioned = runtime / release["filename"]
+        tmp = versioned.with_suffix(versioned.suffix + ".part")
+        req = urllib.request.Request(release["url"], headers={"User-Agent": "GIMP-MCP-Studio/0.4"})
+        sha = hashlib.sha256(); downloaded = 0
+        with urllib.request.urlopen(req, timeout=60) as resp, tmp.open("wb") as out:
+            total = int(resp.headers.get("Content-Length") or 0)
+            while True:
+                block = resp.read(1024 * 1024)
+                if not block: break
+                out.write(block); sha.update(block); downloaded += len(block)
+                if progress: progress(downloaded, total)
+            out.flush(); os.fsync(out.fileno())
+        actual = sha.hexdigest().lower()
+        if actual != expected:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"GIMP AppImage checksum mismatch: expected {expected}, got {actual}")
+        tmp.chmod(0o755); tmp.replace(versioned)
+        link = runtime / "gimp.AppImage"
+        link.unlink(missing_ok=True); link.symlink_to(versioned.name)
+        return {"ok": True, "version": release["version"], "path": str(link), "sha256": actual, "source": release["url"]}
+
+    def gimp_mcp_update_status(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"source": "TriForce curated search + GitHub origin", "current": None, "behind": 0, "ahead": 0}
+        try:
+            result["current"] = _run(["git", "rev-parse", "--short", "HEAD"], timeout=10, cwd=self.root).stdout.strip()
+            _run(["git", "fetch", "--quiet", "origin", "main"], timeout=30, cwd=self.root)
+            counts = _run(["git", "rev-list", "--left-right", "--count", "HEAD...origin/main"], timeout=10, cwd=self.root).stdout.split()
+            result["ahead"] = int(counts[0]) if counts else 0
+            result["behind"] = int(counts[1]) if len(counts) > 1 else 0
+        except Exception as exc:
+            result["error"] = str(exc)
+        # TriForce search is advisory; GitHub origin remains the deterministic source of code truth.
+        try:
+            query = json.dumps({"query": "derleiti gimp-mcp github latest release", "mode": "code", "limit": 8}).encode()
+            req = urllib.request.Request("https://api.ailinux.me/v1/search/curated", data=query, headers={"Content-Type": "application/json", "User-Agent": "GIMP-MCP-Studio/0.4"}, method="POST")
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = json.load(resp)
+            results = payload.get("results") if isinstance(payload, dict) else []
+            relevant = [x for x in (results or []) if "gimp-mcp" in str(x).lower() or "derleiti" in str(x).lower()]
+            result["triforce_search"] = {"ok": True, "result_count": len(results or []), "relevant_count": len(relevant), "mode": payload.get("mode") if isinstance(payload, dict) else None}
+        except Exception as exc:
+            result["triforce_search"] = {"ok": False, "error": str(exc)}
+        return result
+
     def install_system_dependencies(self) -> subprocess.CompletedProcess[str]:
         if not shutil.which("pkexec"):
-            raise RuntimeError("pkexec fehlt; Systempakete bitte manuell mit apt installieren")
+            raise RuntimeError("PolicyKit (pkexec) is not available; install system packages manually with apt")
         cmd = ["pkexec", "apt-get", "install", "-y", *SYSTEM_PACKAGES]
         return _run(cmd, timeout=300, cwd=self.root)
 
     def sync_project(self, *, upgrade: bool = False) -> subprocess.CompletedProcess[str]:
         uv = _find_uv()
         if not uv:
-            raise RuntimeError("uv fehlt")
+            raise RuntimeError("uv is not installed")
         if upgrade:
             lock = _run([uv, "lock", "--upgrade"], timeout=300, cwd=self.root)
             if lock.returncode != 0:
@@ -171,13 +262,13 @@ class SetupManager:
     def update_uv(self) -> subprocess.CompletedProcess[str]:
         uv = _find_uv()
         if not uv:
-            raise RuntimeError("uv fehlt; installiere es zuerst über https://docs.astral.sh/uv/")
+            raise RuntimeError("uv is not installed; install it from the official Astral documentation")
         return _run([uv, "self", "update"], timeout=180, cwd=self.root)
 
     def self_test(self) -> dict[str, Any]:
         uv = _find_uv()
         if not uv:
-            return {"ok": False, "error": "uv fehlt"}
+            return {"ok": False, "error": "uv is not installed"}
         test = _run([uv, "run", "pytest", "-q"], timeout=300, cwd=self.root)
         probe = _run([uv, "run", "python", "-c", "from gimp_mcp.bridge import GimpBridge; print(GimpBridge().probe())"], timeout=90, cwd=self.root)
         return {

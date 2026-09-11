@@ -5,8 +5,10 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import signal
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import QProcess, QTimer, Qt
@@ -14,6 +16,7 @@ from PyQt6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
 from gimp_mcp.control_settings import ControlSettings
 from gimp_mcp.live_bridge import LiveBridge
 from gimp_mcp.setup_manager import SetupManager
+from gimp_mcp.first_run import SetupWizard
 
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -56,7 +59,7 @@ class ControlCenter(QMainWindow):
         self.resize(1180, 760)
         STATE.mkdir(parents=True, exist_ok=True)
         GUI_LOGGER.info("Control Center starting pid=%s root=%s sessions=%s", os.getpid(), ROOT, SESSIONS)
-        tabs = QTabWidget(); self.setCentralWidget(tabs)
+        tabs = QTabWidget(); self.tabs=tabs; self.setCentralWidget(tabs)
         tabs.addTab(self._studio_tab(), "Studio")
         tabs.addTab(self._live_tab(), "Live")
         tabs.addTab(self._server_tab(), "Server")
@@ -65,7 +68,58 @@ class ControlCenter(QMainWindow):
         tabs.addTab(self._settings_tab(), "Settings")
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(750)
         self.refresh()
+        QTimer.singleShot(350, self._maybe_first_run)
+        QTimer.singleShot(900, self._startup_update_check)
 
+    def _maybe_first_run(self):
+        if not CONTROL.load().get("first_run_complete", False):
+            self.open_setup_wizard()
+
+    def open_setup_wizard(self):
+        wizard=SetupWizard(CONTROL, ROOT, self)
+        if wizard.exec():
+            saved=CONTROL.load()
+            self.timer.setInterval(int(saved.get("preview_interval_ms", 750)))
+            self._apply_runtime_settings(saved)
+
+    def _apply_runtime_settings(self, saved=None):
+        saved=saved or CONTROL.load()
+        if saved.get("gimp_runtime") == "managed" and saved.get("managed_gimp_path"):
+            os.environ["GIMP_MCP_GIMP"] = str(saved["managed_gimp_path"])
+        else:
+            os.environ.pop("GIMP_MCP_GIMP", None)
+        port=int(saved.get("mcp_port",8000))
+        os.environ["GIMP_MCP_ENDPOINT"] = f"http://127.0.0.1:{port}/mcp"
+        if saved.get("mcp_network_enabled") and saved.get("mcp_auth_token"):
+            os.environ["GIMP_MCP_AUTH_TOKEN"] = str(saved["mcp_auth_token"])
+        else:
+            os.environ.pop("GIMP_MCP_AUTH_TOKEN", None)
+
+    def _startup_update_check(self):
+        saved=CONTROL.load()
+        if not saved.get("first_run_complete") or not saved.get("check_updates_on_start", True) or not PROJECT_PYTHON.exists():
+            return
+        proc=QProcess(self); proc.setWorkingDirectory(str(ROOT)); proc.setProgram(str(PROJECT_PYTHON)); proc.setArguments(["-m","gimp_mcp.setup_cli","status"])
+        proc.finished.connect(lambda _code,_status,p=proc:self._startup_update_finished(p))
+        self._startup_update_process=proc; proc.start()
+
+    def _startup_update_finished(self, proc):
+        text=bytes(proc.readAllStandardOutput()).decode("utf-8","replace")
+        try:
+            data=json.loads(text); gimp=data.get("gimp") or {}; gm=data.get("gimp_mcp") or {}
+            notes=[]
+            if gimp.get("update_available"):
+                notes.append(f"GIMP {gimp.get('latest_version')} is available (current: {gimp.get('managed_version') or gimp.get('system_version') or 'unknown'}).")
+            if int(gm.get("behind") or 0) > 0:
+                notes.append(f"GIMP MCP has {gm.get('behind')} update(s) available from the verified GitHub origin.")
+            if notes:
+                self.statusBar().showMessage("  ".join(notes), 15000)
+                if hasattr(self,"setup_output"):
+                    self.setup_output.setPlainText("Update check:\n"+"\n".join(notes))
+        except Exception as exc:
+            GUI_LOGGER.warning("Startup update check failed: %s", exc)
+        if getattr(self,"_startup_update_process",None) is proc: self._startup_update_process=None
+        proc.deleteLater()
 
     def _studio_tab(self):
         w=QWidget(); v=QVBoxLayout(w)
@@ -278,13 +332,25 @@ class ControlCenter(QMainWindow):
         start=QPushButton("Start MCP Server"); stop=QPushButton("Stop MCP Server"); start.clicked.connect(self.start_server); stop.clicked.connect(self.stop_server)
         live_install=QPushButton('Install / Update GIMP Live Plug-in'); live_install.clicked.connect(self.install_live_plugin)
         row.addWidget(start); row.addWidget(stop); row.addWidget(live_install); row.addStretch()
-        self.endpoint=QLineEdit("http://127.0.0.1:8000/mcp"); self.endpoint.setReadOnly(True)
+        saved=CONTROL.load(); initial_host=str(saved.get("mcp_bind_host","127.0.0.1")); initial_port=int(saved.get("mcp_port",8000))
+        self.endpoint=QLineEdit(f"http://{initial_host}:{initial_port}/mcp"); self.endpoint.setReadOnly(True)
         copy_endpoint=QPushButton("Copy endpoint"); copy_endpoint.clicked.connect(lambda: QApplication.clipboard().setText(self.endpoint.text()))
-        endpoint_row=QHBoxLayout(); endpoint_row.addWidget(self.endpoint,1); endpoint_row.addWidget(copy_endpoint)
+        copy_config=QPushButton("Copy client config"); copy_config.clicked.connect(self.copy_mcp_client_config)
+        endpoint_row=QHBoxLayout(); endpoint_row.addWidget(self.endpoint,1); endpoint_row.addWidget(copy_endpoint); endpoint_row.addWidget(copy_config)
         v.addWidget(self.server_status); v.addLayout(row); v.addWidget(QLabel("Streamable HTTP endpoint (for MCP clients — not a browser chat page)")); v.addLayout(endpoint_row)
         v.addWidget(QLabel('Opening /mcp directly in a browser may show "Missing session ID"; that is expected because a browser GET does not perform the MCP initialize handshake.'))
         v.addWidget(QLabel('Live GIMP mode: install the plug-in once, then restart GIMP. When connected, successful MCP edits are mirrored into the visible GIMP display.'))
         v.addStretch(); return w
+
+    def copy_mcp_client_config(self):
+        saved=CONTROL.load(); port=int(saved.get("mcp_port",8000))
+        network=bool(saved.get("mcp_network_enabled",False))
+        host=socket.gethostname() if network else "127.0.0.1"
+        config={"name":"GIMP MCP Studio","url":f"http://{host}:{port}/mcp","transport":"streamable-http"}
+        if network and saved.get("mcp_auth_token"):
+            config["headers"]={"Authorization":f"Bearer {saved['mcp_auth_token']}"}
+        QApplication.clipboard().setText(json.dumps(config,indent=2))
+        self.statusBar().showMessage("MCP client configuration copied to clipboard.",5000)
 
     def _ai_tab(self):
         w=QWidget(); v=QVBoxLayout(w)
@@ -322,7 +388,7 @@ class ControlCenter(QMainWindow):
     def setup_check(self):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            data=self._setup_manager().update_check(); self.setup_output.setPlainText(json.dumps(data,indent=2,default=str))
+            data={"gimp":self._setup_manager().managed_gimp_status(),"gimp_mcp":self._setup_manager().gimp_mcp_update_status(),"runtime":self._setup_manager().update_check()}; self.setup_output.setPlainText(json.dumps(data,indent=2,default=str))
         except Exception as exc: self.setup_output.setPlainText(f"Update check failed: {exc}")
         finally: QApplication.restoreOverrideCursor()
 
@@ -356,12 +422,47 @@ class ControlCenter(QMainWindow):
         w=QWidget(); form=QFormLayout(w); saved=CONTROL.load()
         self.preview_interval=QSpinBox(); self.preview_interval.setRange(250,5000); self.preview_interval.setValue(int(saved.get("preview_interval_ms",750)))
         self.preview_size=QSpinBox(); self.preview_size.setRange(256,3000); self.preview_size.setValue(int(saved.get("preview_max",1200)))
+        self.update_on_start=QCheckBox("Check GIMP and GIMP MCP updates on startup"); self.update_on_start.setChecked(bool(saved.get("check_updates_on_start",True)))
+        self.network_enabled=QCheckBox("Allow external MCP clients on the network"); self.network_enabled.setChecked(bool(saved.get("mcp_network_enabled",False)))
+        self.network_host=QLineEdit(str(saved.get("mcp_network_host","0.0.0.0")))
+        self.mcp_port=QSpinBox(); self.mcp_port.setRange(1024,65535); self.mcp_port.setValue(int(saved.get("mcp_port",8000)))
+        token=QLineEdit(str(saved.get("mcp_auth_token", ""))); token.setReadOnly(True); token.setEchoMode(QLineEdit.EchoMode.Password); self.mcp_token=token
+        copy_token=QPushButton("Copy token"); copy_token.clicked.connect(lambda: QApplication.clipboard().setText(CONTROL.load().get("mcp_auth_token", "")))
+        token_row=QHBoxLayout(); token_row.addWidget(token,1); token_row.addWidget(copy_token)
+        token_wrap=QWidget(); token_wrap.setLayout(token_row)
         save=QPushButton("Save settings"); save.clicked.connect(self.save_settings)
-        form.addRow("Live preview interval (ms)", self.preview_interval); form.addRow("Preview max size", self.preview_size); form.addRow(save)
+        reconfigure=QPushButton("Reconfigure Setup"); reconfigure.clicked.connect(self.open_setup_wizard)
+        actions=QHBoxLayout(); actions.addWidget(save); actions.addWidget(reconfigure); actions.addStretch(); action_wrap=QWidget(); action_wrap.setLayout(actions)
+        form.addRow("Live preview interval (ms)", self.preview_interval)
+        form.addRow("Preview max size", self.preview_size)
+        form.addRow(self.update_on_start)
+        form.addRow(self.network_enabled)
+        form.addRow("Network bind address", self.network_host)
+        form.addRow("MCP port", self.mcp_port)
+        form.addRow("Network bearer token", token_wrap)
+        form.addRow(QLabel("Local MCP always uses 127.0.0.1. Network access requires the bearer token and should be limited to trusted LAN/VPN networks."))
+        form.addRow(action_wrap)
         return w
 
     def save_settings(self):
-        data=CONTROL.load(); data.update({"preview_interval_ms":self.preview_interval.value(),"preview_max":self.preview_size.value()}); CONTROL.save(data); self.timer.setInterval(self.preview_interval.value())
+        import secrets
+        data=CONTROL.load()
+        network=self.network_enabled.isChecked()
+        if network and not data.get("mcp_auth_token"):
+            data["mcp_auth_token"]=secrets.token_urlsafe(36)
+        data.update({
+            "preview_interval_ms":self.preview_interval.value(),
+            "preview_max":self.preview_size.value(),
+            "check_updates_on_start":self.update_on_start.isChecked(),
+            "mcp_network_enabled":network,
+            "mcp_network_host":self.network_host.text().strip() or "0.0.0.0",
+            "mcp_bind_host":(self.network_host.text().strip() or "0.0.0.0") if network else "127.0.0.1",
+            "mcp_port":self.mcp_port.value(),
+            "mcp_require_auth":True,
+        })
+        CONTROL.save(data); self.timer.setInterval(self.preview_interval.value()); self._apply_runtime_settings(data)
+        self.mcp_token.setText(str(data.get("mcp_auth_token", "")))
+        QMessageBox.information(self,"Settings saved","Settings were saved. Restart the MCP server to apply bind, port, authentication or GIMP runtime changes.")
 
     def save_ai_selection(self):
         data=CONTROL.load()
@@ -390,10 +491,22 @@ class ControlCenter(QMainWindow):
         if not PROJECT_PYTHON.exists():
             QMessageBox.critical(self,"MCP Server","Project environment is missing. Run uv sync first.")
             return
-        cmd=[str(PROJECT_PYTHON),"-c","from gimp_mcp.server import mcp; mcp.run(transport='streamable-http')"]
+        saved=CONTROL.load(); self._apply_runtime_settings(saved)
+        host=str(saved.get("mcp_bind_host","127.0.0.1")); port=int(saved.get("mcp_port",8000))
+        env=os.environ.copy()
+        if saved.get("mcp_network_enabled"):
+            token=str(saved.get("mcp_auth_token") or "").strip()
+            if not token:
+                QMessageBox.critical(self,"MCP Server","Network MCP requires an authentication token. Save Settings or run Reconfigure Setup first."); return
+            env["GIMP_MCP_AUTH_TOKEN"]=token
+            env["GIMP_MCP_RESOURCE_URL"]=f"http://{host}:{port}/mcp"
+        else:
+            env.pop("GIMP_MCP_AUTH_TOKEN",None); env.pop("GIMP_MCP_RESOURCE_URL",None)
+        code=f"from gimp_mcp.server import mcp; mcp.run(transport='streamable-http', host={host!r}, port={port})"
+        cmd=[str(PROJECT_PYTHON),"-c",code]
         log=(STATE/"server.log").open("ab")
-        p=subprocess.Popen(cmd,cwd=str(ROOT),stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
-        PIDFILE.write_text(str(p.pid)); self.refresh()
+        p=subprocess.Popen(cmd,cwd=str(ROOT),stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=env)
+        PIDFILE.write_text(str(p.pid)); self.endpoint.setText(f"http://{host}:{port}/mcp"); self.refresh()
 
     def stop_server(self):
         pid=self._server_pid()
@@ -583,7 +696,7 @@ class ControlCenter(QMainWindow):
         GUI_LOGGER.info("Control Center closing pid=%s", os.getpid())
         # QProcess children can otherwise finish during Qt teardown and call
         # slots on already-destroyed wrappers. Stop only helper processes we own.
-        for attr in ("_studio_models_process", "_provider_process"):
+        for attr in ("_studio_models_process", "_provider_process", "_startup_update_process"):
             proc=getattr(self,attr,None)
             if proc is None:
                 continue

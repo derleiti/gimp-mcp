@@ -9,7 +9,17 @@ DEFAULTS = {
     "auto_preview": True,
     "preview_interval_ms": 750,
     "preview_max": 1200,
-    "open_gimp_after_create": False,
+    "open_gimp_after_create": True,
+    "first_run_complete": False,
+    "check_updates_on_start": True,
+    "gimp_runtime": "system",
+    "managed_gimp_path": "",
+    "mcp_bind_host": "127.0.0.1",
+    "mcp_port": 8000,
+    "mcp_network_enabled": False,
+    "mcp_network_host": "0.0.0.0",
+    "mcp_require_auth": True,
+    "mcp_auth_token": "",
 }
 
 class ControlSettings:
