@@ -10,6 +10,7 @@ from pathlib import Path
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QPixmap
 from gimp_mcp.control_settings import ControlSettings
+from gimp_mcp.setup_manager import SetupManager
 
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -34,6 +35,7 @@ class ControlCenter(QMainWindow):
         tabs.addTab(self._live_tab(), "Live")
         tabs.addTab(self._server_tab(), "Server")
         tabs.addTab(self._ai_tab(), "AI Control")
+        tabs.addTab(self._setup_tab(), "Setup / Updates")
         tabs.addTab(self._settings_tab(), "Settings")
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(750)
         self.refresh()
@@ -69,6 +71,58 @@ class ControlCenter(QMainWindow):
         self.provider_output=QTextEdit(); self.provider_output.setReadOnly(True); v.addWidget(self.provider_output,1)
         QTimer.singleShot(100, self.provider_status)
         return w
+
+
+    def _setup_tab(self):
+        w=QWidget(); v=QVBoxLayout(w)
+        v.addWidget(QLabel("One-shot setup, repair and update checks. System package installation always asks through PolicyKit."))
+        row=QHBoxLayout()
+        check=QPushButton("Check system / updates"); install=QPushButton("Install / repair dependencies")
+        sync=QPushButton("Sync project"); upgrade=QPushButton("Upgrade project deps")
+        uvup=QPushButton("Update uv"); test=QPushButton("Run self-test")
+        check.clicked.connect(self.setup_check); install.clicked.connect(self.setup_install)
+        sync.clicked.connect(lambda: self.setup_sync(False)); upgrade.clicked.connect(lambda: self.setup_sync(True))
+        uvup.clicked.connect(self.setup_uv_update); test.clicked.connect(self.setup_self_test)
+        for b in (check,install,sync,upgrade,uvup,test): row.addWidget(b)
+        row.addStretch(); v.addLayout(row)
+        self.setup_output=QTextEdit(); self.setup_output.setReadOnly(True); v.addWidget(self.setup_output,1)
+        return w
+
+    def _setup_manager(self):
+        return SetupManager(Path.home()/"gimp-mcp")
+
+    def setup_check(self):
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            data=self._setup_manager().update_check(); self.setup_output.setPlainText(json.dumps(data,indent=2,default=str))
+        except Exception as exc: self.setup_output.setPlainText(f"Update check failed: {exc}")
+        finally: QApplication.restoreOverrideCursor()
+
+    def setup_install(self):
+        answer=QMessageBox.question(self,"Install system dependencies","Install/repair GIMP, GI, PyQt6, venv, git and curl using APT? PolicyKit will ask for authorization.")
+        if answer != QMessageBox.StandardButton.Yes: return
+        try:
+            r=self._setup_manager().install_system_dependencies(); self.setup_output.setPlainText((r.stdout or "")+(r.stderr or ""))
+        except Exception as exc: self.setup_output.setPlainText(str(exc))
+
+    def setup_sync(self, upgrade=False):
+        if upgrade:
+            answer=QMessageBox.question(self,"Upgrade project dependencies","Resolve newer project dependency versions and rewrite uv.lock, then sync? This may change runtime behavior.")
+            if answer != QMessageBox.StandardButton.Yes: return
+        try:
+            r=self._setup_manager().sync_project(upgrade=upgrade); self.setup_output.setPlainText((r.stdout or "")+(r.stderr or ""))
+        except Exception as exc: self.setup_output.setPlainText(str(exc))
+
+    def setup_uv_update(self):
+        try:
+            r=self._setup_manager().update_uv(); self.setup_output.setPlainText((r.stdout or "")+(r.stderr or ""))
+        except Exception as exc: self.setup_output.setPlainText(str(exc))
+
+    def setup_self_test(self):
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try: self.setup_output.setPlainText(json.dumps(self._setup_manager().self_test(),indent=2,default=str))
+        except Exception as exc: self.setup_output.setPlainText(str(exc))
+        finally: QApplication.restoreOverrideCursor()
 
     def _settings_tab(self):
         w=QWidget(); form=QFormLayout(w); saved=CONTROL.load()

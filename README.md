@@ -109,3 +109,17 @@ user prompt
 ## Architecture direction
 
 The current production-safe path remains batch-isolated GIMP execution. The next major bridge is a persistent GIMP 3 plug-in/IPC mode for truly visible edits inside one open GIMP GUI. The semantic MCP layer, session IDs, event bus and Control Center are intentionally transport-independent so a future `PersistentPluginBridge` can replace or complement the current batch bridge without changing AI-facing tools.
+
+## One-shot setup and update checks
+
+Launch `./scripts/gimp-mcp-control` and open **Setup / Updates**. The studio can:
+
+- check required Debian/Ubuntu/AILinux packages and configured APT candidates,
+- compare selected upstream versions for GIMP, uv, MCP and PyQt6,
+- install/repair system dependencies through PolicyKit after explicit confirmation,
+- `uv sync` the project or explicitly upgrade/re-lock dependencies,
+- update `uv`,
+- fetch repository update state, and
+- run pytest plus a real GIMP bridge probe.
+
+The updater distinguishes **distribution candidate** from **upstream latest**. It does not silently replace distro packages with foreign repositories.

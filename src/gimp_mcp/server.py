@@ -21,7 +21,7 @@ ops = GimpOperations(bridge, sessions)
 events = EventBus(settings.state_dir / "events.jsonl")
 ai_control = AICoderAdapter()
 
-mcp = MCPServer('GIMP MCP', version='0.1.0', instructions='Structured GIMP 3 artwork editing. Create/open a session first, use semantic tools, render previews to inspect progress, and use filter_list/filter_describe before unfamiliar GEGL effects.')
+mcp = MCPServer('GIMP MCP', version='0.2.0', instructions='Structured GIMP 3 artwork editing. Create/open a session first, use semantic tools, render previews to inspect progress, and use filter_list/filter_describe before unfamiliar GEGL effects.')
 
 
 def _ok(data: Any) -> dict[str, Any]:
