@@ -71,6 +71,18 @@ class GimpOperations:
     def layer_set(self, s: ArtworkSession, layer_id: int, *, name: str | None = None, visible: bool | None = None, opacity: float | None = None) -> dict[str, Any]:
         if opacity is not None and not 0 <= opacity <= 100:
             raise GimpMcpError('INVALID_ARGUMENT', 'opacity must be 0..100', False)
+        if self.live.status().get('ok'):
+            with s.lock:
+                snap = self.sessions.snapshot(s)
+                try:
+                    result = self.live.layer_update(s.document, layer_id, name=name, visible=visible, opacity=opacity)
+                    if result.get('ok'):
+                        result['execution_mode'] = 'live-direct'
+                        return result
+                    raise RuntimeError(result.get('error') or 'live layer update failed')
+                except Exception:
+                    self.sessions.rollback_failed(s, snap)
+                    self._mirror(s)
         body = _load(s.document) + _layer_lookup(layer_id)
         if name is not None: body += f"layer.set_name({_q(name)})\n"
         if visible is not None: body += f"layer.set_visible({bool(visible)})\n"
@@ -104,6 +116,18 @@ class GimpOperations:
         return self._mutate(s, body)
 
     def transform(self, s: ArtworkSession, layer_id: int, action: str, values: list[float]) -> dict[str, Any]:
+        if action == 'translate' and len(values) == 2 and self.live.status().get('ok'):
+            with s.lock:
+                snap = self.sessions.snapshot(s)
+                try:
+                    result = self.live.translate(s.document, layer_id, float(values[0]), float(values[1]))
+                    if result.get('ok'):
+                        result['execution_mode'] = 'live-direct'
+                        return result
+                    raise RuntimeError(result.get('error') or 'live translate failed')
+                except Exception:
+                    self.sessions.rollback_failed(s, snap)
+                    self._mirror(s)
         body = _load(s.document) + _layer_lookup(layer_id)
         if action == 'translate' and len(values) == 2: body += f"layer.transform_translate({float(values[0])},{float(values[1])})\n"
         elif action == 'rotate' and len(values) in {1,3}:

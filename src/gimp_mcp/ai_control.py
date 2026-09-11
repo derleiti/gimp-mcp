@@ -76,6 +76,28 @@ class AICoderAdapter:
         rows = client.list_models()
         return list(rows) if isinstance(rows, list) else list(rows.get("models", []))
 
+    def chat(self, provider: str, model: str, message: str, system_prompt: str) -> str:
+        root = str(self.root)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        if provider == "triforce":
+            cfg = importlib.import_module("aicoder.config")
+            client_mod = importlib.import_module("aicoder.client")
+            session = cfg.load_session()
+            client = client_mod.TriForceClient(session.base_url, token=session.token, timeout=120)
+            result = client.chat(message=message, model=model, system_prompt=system_prompt, temperature=0.2, max_tokens=4096)
+        else:
+            mod = self._module()
+            transport = mod.standalone_account_transport(timeout=120)
+            account_model = model if str(model).startswith(f"account:{provider}/") else f"account:{provider}/{model}"
+            result = transport.chat(message=message, model=account_model, system_prompt=system_prompt, temperature=0.2, max_tokens=4096)
+        if not isinstance(result, dict):
+            raise AIControlError("provider returned a non-object response")
+        text = str(result.get("response") or result.get("text") or result.get("content") or "").strip()
+        if not text:
+            raise AIControlError("provider returned an empty response")
+        return text
+
     def disconnect(self, provider: str) -> dict[str, Any]:
         self._module().disconnect_account(provider)
         return {"provider": provider, "connected": False}

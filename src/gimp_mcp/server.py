@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging, shutil, time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 from mcp.server import MCPServer
@@ -13,6 +14,8 @@ from .operations import GimpOperations
 from .security import PathPolicy
 from .sessions import SessionManager
 from .live_bridge import LiveBridge
+from .jobs import JobManager
+from .prompt_runner import PromptRunner
 
 settings = Settings()
 policy = PathPolicy(settings.allowed_roots)
@@ -22,8 +25,9 @@ ops = GimpOperations(bridge, sessions)
 live_bridge = LiveBridge()
 events = EventBus(settings.state_dir / "events.jsonl")
 ai_control = AICoderAdapter()
+jobs = JobManager(settings.state_dir / "jobs")
 
-mcp = MCPServer('GIMP MCP', version='0.3.0', instructions='Structured GIMP 3 artwork editing. Create/open a session first, use semantic tools, render previews to inspect progress, and use filter_list/filter_describe before unfamiliar GEGL effects.')
+mcp = MCPServer('GIMP MCP', version='0.4.0', instructions='Structured GIMP 3 artwork editing. Create/open a session first, use semantic tools, render previews to inspect progress, and use filter_list/filter_describe before unfamiliar GEGL effects.')
 
 
 def _ok(data: Any) -> dict[str, Any]:
@@ -236,6 +240,113 @@ def pdb_search(query: str = '', limit: int = 100) -> dict[str, Any]:
 def pdb_describe(name: str) -> dict[str, Any]:
     '''Expert discovery: inspect the arguments and returns of one GIMP PDB procedure. This tool is read-only.'''
     return _call(ops.pdb_describe, name)
+
+
+
+def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "session_create": session_create,
+        "layer_create": layer_create,
+        "layer_delete": layer_delete,
+        "layer_update": layer_update,
+        "layer_reorder": layer_reorder,
+        "selection_set": selection_set,
+        "text_create": text_create,
+        "transform_layer": transform_layer,
+        "filter_apply": filter_apply,
+        "preview_render": preview_render,
+    }
+    fn = allowed.get(name)
+    if fn is None:
+        return {"ok": False, "error": {"code": "UNKNOWN_TOOL", "message": f"Studio tool not allowed: {name}", "recoverable": False}}
+    return fn(**arguments)
+
+
+def _prompt_runner() -> PromptRunner:
+    return PromptRunner(jobs, ai_control.chat, _studio_tool_call)
+
+
+@mcp.tool()
+def artwork_job_create(prompt: str, provider: str = "triforce", model: str = "", mode: Literal["auto", "live", "batch"] = "auto", session_id: str | None = None) -> dict[str, Any]:
+    """Create and persist an AI-to-GIMP artwork job without running it yet."""
+    try:
+        job = jobs.create(prompt, provider, model, mode, session_id)
+        return _ok(asdict(job))
+    except Exception as exc:
+        return {"ok": False, "error": {"code": "JOB_CREATE_FAILED", "message": str(exc), "recoverable": True}}
+
+
+@mcp.tool()
+def artwork_job_status(job_id: str) -> dict[str, Any]:
+    """Return persistent artwork-job state and progress."""
+    try:
+        return _ok(asdict(jobs.get(job_id)))
+    except KeyError:
+        return {"ok": False, "error": {"code": "JOB_NOT_FOUND", "message": f"Unknown job: {job_id}", "recoverable": False}}
+
+
+@mcp.tool()
+def artwork_job_list() -> dict[str, Any]:
+    """List persisted artwork jobs, newest active jobs first."""
+    return _ok([asdict(x) for x in jobs.list()])
+
+
+@mcp.tool()
+def artwork_job_run(job_id: str) -> dict[str, Any]:
+    """Run a queued/paused artwork job through the selected AI provider and semantic GIMP tools."""
+    try:
+        job = jobs.get(job_id)
+        result = _prompt_runner().run(job)
+        return _ok(asdict(result)) if result.status == "completed" else {"ok": False, "data": asdict(result), "error": {"code": "JOB_FAILED", "message": result.error or result.status, "recoverable": result.status != "cancelled"}}
+    except KeyError:
+        return {"ok": False, "error": {"code": "JOB_NOT_FOUND", "message": f"Unknown job: {job_id}", "recoverable": False}}
+
+
+@mcp.tool()
+def artwork_job_pause(job_id: str) -> dict[str, Any]:
+    """Cooperatively pause an artwork job at the next safe step boundary."""
+    try:
+        return _ok(asdict(jobs.pause(job_id)))
+    except KeyError:
+        return {"ok": False, "error": {"code": "JOB_NOT_FOUND", "message": f"Unknown job: {job_id}", "recoverable": False}}
+
+
+@mcp.tool()
+def artwork_job_resume(job_id: str) -> dict[str, Any]:
+    """Clear the pause flag for an artwork job. Call artwork_job_run to continue execution."""
+    try:
+        return _ok(asdict(jobs.resume(job_id)))
+    except KeyError:
+        return {"ok": False, "error": {"code": "JOB_NOT_FOUND", "message": f"Unknown job: {job_id}", "recoverable": False}}
+
+
+@mcp.tool()
+def artwork_job_cancel(job_id: str) -> dict[str, Any]:
+    """Cancel an artwork job at the next safe step boundary."""
+    try:
+        return _ok(asdict(jobs.cancel(job_id)))
+    except KeyError:
+        return {"ok": False, "error": {"code": "JOB_NOT_FOUND", "message": f"Unknown job: {job_id}", "recoverable": False}}
+
+
+@mcp.tool()
+def artwork_followup(job_id: str, prompt: str) -> dict[str, Any]:
+    """Apply a follow-up art direction to the existing session and preserve undo history."""
+    try:
+        result = _prompt_runner().followup(jobs.get(job_id), prompt)
+        return _ok(asdict(result)) if result.status == "completed" else {"ok": False, "data": asdict(result), "error": {"code": "JOB_FAILED", "message": result.error or result.status, "recoverable": True}}
+    except KeyError:
+        return {"ok": False, "error": {"code": "JOB_NOT_FOUND", "message": f"Unknown job: {job_id}", "recoverable": False}}
+
+
+@mcp.tool()
+def artwork_make_it_cooler(job_id: str, preset: str = "Make it cooler") -> dict[str, Any]:
+    """Ask the selected model for a few targeted improvements and execute them through safe semantic GIMP actions."""
+    try:
+        result = _prompt_runner().make_it_cooler(jobs.get(job_id), preset)
+        return _ok(asdict(result)) if result.status == "completed" else {"ok": False, "data": asdict(result), "error": {"code": "JOB_FAILED", "message": result.error or result.status, "recoverable": True}}
+    except KeyError:
+        return {"ok": False, "error": {"code": "JOB_NOT_FOUND", "message": f"Unknown job: {job_id}", "recoverable": False}}
 
 
 def main() -> None:

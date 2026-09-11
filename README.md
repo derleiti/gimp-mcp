@@ -18,7 +18,7 @@ Produktionsnaher MCP-Server fuer strukturierte GIMP-3-Automation. Ziel ist eine 
 
 `MCP client -> semantic tools -> SessionManager -> GimpBridge -> GIMP python-fu-eval -> libgimp/PDB/DrawableFilter`
 
-Version 0.1 nutzt bewusst crash-isolierte Batch-Aufrufe und persistiert Sessionzustand als XCF. Das ist langsamer als ein langlebiger Plug-in-Prozess, aber robust und testbar. Eine persistente Plug-in/IPC-Bridge ist fuer spaetere Versionen vorgesehen, wenn Lifecycle, Main-Loop und Recovery sauber geklaert sind.
+Version 0.4 kombiniert crash-isolierte Batch-Aufrufe mit einer optionalen persistenten GIMP-Bridge. Direkte Live-Operationen werden fuer sichere Layer-Mutationen verwendet; bei Ausfall bleibt Batch der deterministische Fallback.
 
 ## Installation
 
@@ -140,6 +140,16 @@ Restart GIMP once. The plug-in starts automatically as a `PERSISTENT` GIMP proce
 
 When the socket is available, successful MCP document mutations are mirrored into a visible GIMP display. If GIMP is closed or the live plug-in is unavailable, GIMP MCP falls back to the crash-isolated batch workflow automatically.
 
-The first live implementation is deliberately a **visible document mirror**, not remote arbitrary Python execution. Direct in-process semantic editing is the next refinement.
+The persistent bridge started as a visible document mirror. In 0.4 it also supports a small whitelist of direct in-process layer operations; all unsupported operations remain on the isolated batch path. Arbitrary Python execution is not exposed.
 
 See `docs/CREATIVE_AI_CLOUD.md` for the shared multi-application direction, including a proposed FL Studio MCP adapter.
+
+## GIMP MCP Studio 0.4
+
+The default Control Center view is now **Studio**: prompt -> selected provider/model -> persistent artwork job -> safe semantic GIMP actions -> live preview -> follow-up/export workflow. Jobs survive application restarts and recover as paused instead of silently disappearing.
+
+Model output is treated as untrusted input. The PromptRunner accepts only structured JSON plans using a small semantic allowlist, validates arguments, rejects invented/executable tools, limits repair attempts, and never executes model-provided Python or shell commands.
+
+Direct persistent editing currently covers layer rename, visibility, opacity and translation. The plug-in saves direct mutations back to the session XCF and flushes displays. Other operations continue through the isolated batch path and mirror back into the visible GIMP document.
+
+See `docs/QUICKSTART.md` and `CHANGELOG.md`.

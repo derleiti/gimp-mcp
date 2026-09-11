@@ -33,6 +33,7 @@ class ControlCenter(QMainWindow):
         self.resize(1180, 760)
         STATE.mkdir(parents=True, exist_ok=True)
         tabs = QTabWidget(); self.setCentralWidget(tabs)
+        tabs.addTab(self._studio_tab(), "Studio")
         tabs.addTab(self._live_tab(), "Live")
         tabs.addTab(self._server_tab(), "Server")
         tabs.addTab(self._ai_tab(), "AI Control")
@@ -40,6 +41,96 @@ class ControlCenter(QMainWindow):
         tabs.addTab(self._settings_tab(), "Settings")
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(750)
         self.refresh()
+
+
+    def _studio_tab(self):
+        w=QWidget(); v=QVBoxLayout(w)
+        top=QHBoxLayout()
+        self.studio_provider=QComboBox(); self.studio_provider.addItems(["triforce","chatgpt","claude","gemini","mistral"])
+        self.studio_model=QLineEdit(); self.studio_model.setPlaceholderText("model id")
+        self.studio_mode=QComboBox(); self.studio_mode.addItems(["auto","live","batch"])
+        top.addWidget(QLabel("Provider")); top.addWidget(self.studio_provider); top.addWidget(QLabel("Model")); top.addWidget(self.studio_model,1); top.addWidget(QLabel("Mode")); top.addWidget(self.studio_mode)
+        v.addLayout(top)
+        self.studio_prompt=QTextEdit(); self.studio_prompt.setPlaceholderText("Describe the artwork or edit you want GIMP to perform...")
+        v.addWidget(QLabel("Prompt")); v.addWidget(self.studio_prompt,1)
+        row=QHBoxLayout()
+        run=QPushButton("RUN"); pause=QPushButton("PAUSE"); stop=QPushButton("STOP"); undo=QPushButton("UNDO"); redo=QPushButton("REDO"); cooler=QPushButton("MAKE IT COOLER")
+        run.clicked.connect(self.studio_run); pause.clicked.connect(self.studio_pause); stop.clicked.connect(self.studio_stop); undo.clicked.connect(self.studio_undo); redo.clicked.connect(self.studio_redo); cooler.clicked.connect(self.studio_cooler)
+        for b in (run,pause,stop,undo,redo,cooler): row.addWidget(b)
+        row.addStretch(); v.addLayout(row)
+        self.studio_status=QLabel("No active job")
+        self.studio_plan=QTextEdit(); self.studio_plan.setReadOnly(True)
+        v.addWidget(self.studio_status); v.addWidget(self.studio_plan,1)
+        self.studio_followup=QLineEdit(); self.studio_followup.setPlaceholderText("Follow-up: e.g. eyes friendlier, less glow")
+        send=QPushButton("SEND"); send.clicked.connect(self.studio_followup_send)
+        fr=QHBoxLayout(); fr.addWidget(self.studio_followup,1); fr.addWidget(send); v.addLayout(fr)
+        saved=CONTROL.load(); self.studio_provider.setCurrentText(saved.get("ai_provider","triforce")); self.studio_model.setText(saved.get("ai_model","") or "")
+        self._studio_job_id=None
+        return w
+
+    def _studio_refresh_job(self):
+        if not self._studio_job_id: return
+        try:
+            from gimp_mcp.server import jobs
+            job=jobs.get(self._studio_job_id)
+            self.studio_status.setText(f"Job {job.job_id[:8]} · {job.status} · step {job.current_step} · {job.progress:.1f}%")
+            self.studio_plan.setPlainText(json.dumps(job.plan or {"status":job.status,"error":job.error},indent=2,ensure_ascii=False))
+        except Exception as exc:
+            self.studio_status.setText(str(exc))
+
+    def studio_run(self):
+        prompt=self.studio_prompt.toPlainText().strip()
+        if not prompt: return
+        try:
+            from gimp_mcp.server import jobs, _prompt_runner
+            job=jobs.create(prompt,self.studio_provider.currentText(),self.studio_model.text().strip(),self.studio_mode.currentText())
+            self._studio_job_id=job.job_id
+            import threading
+            threading.Thread(target=lambda: _prompt_runner().run(job),daemon=True).start()
+            self._studio_refresh_job()
+        except Exception as exc: self.studio_status.setText(f"Run failed: {exc}")
+
+    def studio_pause(self):
+        if not self._studio_job_id: return
+        from gimp_mcp.server import jobs
+        jobs.pause(self._studio_job_id); self._studio_refresh_job()
+
+    def studio_stop(self):
+        if not self._studio_job_id: return
+        from gimp_mcp.server import jobs
+        jobs.cancel(self._studio_job_id); self._studio_refresh_job()
+
+    def studio_undo(self):
+        if not self._studio_job_id: return
+        try:
+            from gimp_mcp.server import jobs, session_undo
+            job=jobs.get(self._studio_job_id)
+            if job.session_id: session_undo(job.session_id)
+        finally: self._studio_refresh_job()
+
+    def studio_redo(self):
+        if not self._studio_job_id: return
+        try:
+            from gimp_mcp.server import jobs, session_redo
+            job=jobs.get(self._studio_job_id)
+            if job.session_id: session_redo(job.session_id)
+        finally: self._studio_refresh_job()
+
+    def studio_followup_send(self):
+        text=self.studio_followup.text().strip()
+        if not self._studio_job_id or not text: return
+        from gimp_mcp.server import jobs, _prompt_runner
+        job=jobs.get(self._studio_job_id)
+        import threading
+        threading.Thread(target=lambda: _prompt_runner().followup(job,text),daemon=True).start()
+        self.studio_followup.clear()
+
+    def studio_cooler(self):
+        if not self._studio_job_id: return
+        from gimp_mcp.server import jobs, _prompt_runner
+        job=jobs.get(self._studio_job_id)
+        import threading
+        threading.Thread(target=lambda: _prompt_runner().make_it_cooler(job),daemon=True).start()
 
     def _live_tab(self):
         w=QWidget(); outer=QHBoxLayout(w)
@@ -229,6 +320,7 @@ class ControlCenter(QMainWindow):
                 except Exception: pass
             self.log.setPlainText("\n".join(pretty)); self.log.moveCursor(self.log.textCursor().MoveOperation.End)
         if self.sessions.currentItem(): self._load_preview(self.sessions.currentItem().text())
+        self._studio_refresh_job()
 
 
 def main():

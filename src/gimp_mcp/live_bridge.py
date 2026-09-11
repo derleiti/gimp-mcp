@@ -42,6 +42,15 @@ class LiveBridge:
     def show_document(self, path: Path) -> dict[str, Any]:
         return self.request('show_document', path=str(path))
 
+    def layer_update(self, path: Path, layer_id: int, *, name: str | None = None, visible: bool | None = None, opacity: float | None = None) -> dict[str, Any]:
+        return self.request("layer_update", path=str(path), layer_id=int(layer_id), name=name, visible=visible, opacity=opacity)
+
+    def translate(self, path: Path, layer_id: int, dx: float, dy: float) -> dict[str, Any]:
+        return self.request("translate", path=str(path), layer_id=int(layer_id), dx=float(dx), dy=float(dy))
+
+    def undo(self, path: Path) -> dict[str, Any]:
+        return self.request("undo", path=str(path))
+
     def mirror_if_available(self, path: Path) -> dict[str, Any] | None:
         if not self.available():
             return None

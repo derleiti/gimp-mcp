@@ -129,6 +129,42 @@ class GimpMcpLive(Gimp.PlugIn):
                     'layers': [x.get_name() for x in image.get_layers()],
                 },
             }
+        if command in {'layer_update', 'translate', 'undo'}:
+            image = self._image
+            if image is None:
+                raise RuntimeError('no live image is open')
+            raw = str(payload.get('path') or '')
+            path = Path(raw).expanduser().resolve()
+            if not path.is_file() or path.suffix.lower() != '.xcf':
+                raise RuntimeError('direct editing requires the active session .xcf path')
+            if command == 'undo':
+                changed = bool(image.undo())
+                Gimp.file_save(Gimp.RunMode.NONINTERACTIVE, image, Gio.File.new_for_path(str(path)), None)
+                Gimp.displays_flush()
+                return {'ok': True, 'command': command, 'changed': changed}
+            layer_id = int(payload.get('layer_id'))
+            layer = next((x for x in image.get_layers() if int(x.get_tattoo()) == layer_id), None)
+            if layer is None:
+                raise RuntimeError('LAYER_NOT_FOUND')
+            image.undo_group_start()
+            try:
+                if command == 'layer_update':
+                    if payload.get('name') is not None:
+                        layer.set_name(str(payload['name']))
+                    if payload.get('visible') is not None:
+                        layer.set_visible(bool(payload['visible']))
+                    if payload.get('opacity') is not None:
+                        opacity = float(payload['opacity'])
+                        if not 0.0 <= opacity <= 100.0:
+                            raise RuntimeError('opacity must be 0..100')
+                        layer.set_opacity(opacity)
+                elif command == 'translate':
+                    layer.transform_translate(float(payload.get('dx', 0.0)), float(payload.get('dy', 0.0)))
+            finally:
+                image.undo_group_end()
+            Gimp.file_save(Gimp.RunMode.NONINTERACTIVE, image, Gio.File.new_for_path(str(path)), None)
+            Gimp.displays_flush()
+            return {'ok': True, 'command': command, 'layer_id': layer_id, 'name': layer.get_name(), 'visible': layer.get_visible(), 'opacity': layer.get_opacity()}
         if command == 'show_document':
             raw = str(payload.get('path') or '')
             path = Path(raw).expanduser().resolve()
