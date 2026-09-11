@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QProcess, QTimer, Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QKeySequence, QPixmap, QShortcut
 from gimp_mcp.control_settings import ControlSettings
 from gimp_mcp.live_bridge import LiveBridge
 from gimp_mcp.setup_manager import SetupManager
@@ -53,7 +53,12 @@ class ControlCenter(QMainWindow):
         self.studio_mode=QComboBox(); self.studio_mode.addItems(["auto","live","batch"])
         top.addWidget(QLabel("Provider")); top.addWidget(self.studio_provider); top.addWidget(QLabel("Model")); top.addWidget(self.studio_model,1); top.addWidget(QLabel("Mode")); top.addWidget(self.studio_mode)
         v.addLayout(top)
-        self.studio_prompt=QTextEdit(); self.studio_prompt.setPlaceholderText("Describe the artwork or edit you want GIMP to perform...")
+        self.studio_prompt=QTextEdit(); self.studio_prompt.setPlaceholderText("Describe the artwork or edit you want GIMP to perform... (Ctrl+Enter to run)")
+        run_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self.studio_prompt)
+        run_shortcut.activated.connect(self.studio_run)
+        run_shortcut_keypad = QShortcut(QKeySequence("Ctrl+Enter"), self.studio_prompt)
+        run_shortcut_keypad.activated.connect(self.studio_run)
+        self._studio_shortcuts = (run_shortcut, run_shortcut_keypad)
         v.addWidget(QLabel("Prompt")); v.addWidget(self.studio_prompt,1)
         row=QHBoxLayout()
         run=QPushButton("RUN"); pause=QPushButton("PAUSE"); stop=QPushButton("STOP"); undo=QPushButton("UNDO"); redo=QPushButton("REDO"); cooler=QPushButton("MAKE IT COOLER")
@@ -63,9 +68,11 @@ class ControlCenter(QMainWindow):
         self.studio_status=QLabel("No active job")
         self.studio_plan=QTextEdit(); self.studio_plan.setReadOnly(True)
         v.addWidget(self.studio_status); v.addWidget(self.studio_plan,1)
-        self.studio_followup=QLineEdit(); self.studio_followup.setPlaceholderText("Follow-up: e.g. eyes friendlier, less glow")
+        self.studio_followup=QLineEdit()
+        self.studio_followup.setPlaceholderText("Quick prompt / follow-up — Enter sends. With no job this starts a new artwork.")
+        self.studio_followup.returnPressed.connect(self.studio_followup_send)
         send=QPushButton("SEND"); send.clicked.connect(self.studio_followup_send)
-        fr=QHBoxLayout(); fr.addWidget(self.studio_followup,1); fr.addWidget(send); v.addLayout(fr)
+        fr=QHBoxLayout(); fr.addWidget(QLabel("Quick prompt / follow-up")); fr.addWidget(self.studio_followup,1); fr.addWidget(send); v.addLayout(fr)
         saved=CONTROL.load(); self.studio_provider.setCurrentText(saved.get("ai_provider","triforce")); self.studio_model.setText(saved.get("ai_model","") or "")
         self._studio_job_id=None
         return w
@@ -120,12 +127,24 @@ class ControlCenter(QMainWindow):
 
     def studio_followup_send(self):
         text=self.studio_followup.text().strip()
-        if not self._studio_job_id or not text: return
-        from gimp_mcp.server import jobs, _prompt_runner
-        job=jobs.get(self._studio_job_id)
+        if not text:
+            return
+        self.studio_followup.clear()
+        if not self._studio_job_id:
+            # The compact input doubles as the initial prompt. Previously SEND
+            # silently did nothing until a job already existed.
+            self.studio_prompt.setPlainText(text)
+            self.studio_run()
+            return
+        try:
+            from gimp_mcp.server import jobs, _prompt_runner
+            job=jobs.get(self._studio_job_id)
+        except Exception as exc:
+            self.studio_status.setText(f"Follow-up failed: {exc}")
+            return
         import threading
         threading.Thread(target=lambda: _prompt_runner().followup(job,text),daemon=True).start()
-        self.studio_followup.clear()
+        self.studio_status.setText(f"Follow-up queued for job {job.job_id[:8]}…")
 
     def studio_cooler(self):
         if not self._studio_job_id: return
