@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtGui import QPixmap
+from gimp_mcp.control_settings import ControlSettings
+
+from PyQt6.QtWidgets import (
+    QApplication, QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QMainWindow, QMessageBox, QPushButton, QSpinBox, QTabWidget,
+    QTextEdit, QVBoxLayout, QWidget
+)
+
+STATE = Path(os.getenv("GIMP_MCP_STATE_DIR", str(Path.home() / ".local/state/gimp-mcp")))
+EVENTS = STATE / "events.jsonl"
+SESSIONS = Path(os.getenv("GIMP_MCP_SESSION_ROOT", "/tmp/gimp-mcp/sessions"))
+PIDFILE = STATE / "server.pid"
+CONTROL = ControlSettings(STATE / "control.json")
+
+
+class ControlCenter(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("GIMP MCP Control Center")
+        self.resize(1180, 760)
+        STATE.mkdir(parents=True, exist_ok=True)
+        tabs = QTabWidget(); self.setCentralWidget(tabs)
+        tabs.addTab(self._live_tab(), "Live")
+        tabs.addTab(self._server_tab(), "Server")
+        tabs.addTab(self._ai_tab(), "AI Control")
+        tabs.addTab(self._settings_tab(), "Settings")
+        self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(750)
+        self.refresh()
+
+    def _live_tab(self):
+        w=QWidget(); outer=QHBoxLayout(w)
+        left=QVBoxLayout(); right=QVBoxLayout()
+        self.sessions=QListWidget(); self.sessions.currentTextChanged.connect(self._session_changed)
+        self.log=QTextEdit(); self.log.setReadOnly(True)
+        left.addWidget(QLabel("Artwork sessions")); left.addWidget(self.sessions,1); left.addWidget(QLabel("Live operations")); left.addWidget(self.log,2)
+        self.preview=QLabel("No preview yet"); self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.preview.setMinimumSize(520,420)
+        right.addWidget(QLabel("Live preview")); right.addWidget(self.preview,1)
+        outer.addLayout(left,1); outer.addLayout(right,2); return w
+
+    def _server_tab(self):
+        w=QWidget(); v=QVBoxLayout(w)
+        self.server_status=QLabel(); row=QHBoxLayout();
+        start=QPushButton("Start MCP Server"); stop=QPushButton("Stop MCP Server"); start.clicked.connect(self.start_server); stop.clicked.connect(self.stop_server)
+        row.addWidget(start); row.addWidget(stop); row.addStretch()
+        self.endpoint=QLineEdit("http://127.0.0.1:8000/mcp"); self.endpoint.setReadOnly(True)
+        v.addWidget(self.server_status); v.addLayout(row); v.addWidget(QLabel("Streamable HTTP endpoint")); v.addWidget(self.endpoint); v.addStretch(); return w
+
+    def _ai_tab(self):
+        w=QWidget(); v=QVBoxLayout(w)
+        v.addWidget(QLabel("Choose an optional AI art director. Provider credentials stay with official clients/AICoder."))
+        self.provider=QComboBox(); self.provider.addItems(["triforce","chatgpt","claude","gemini","mistral"])
+        self.model=QComboBox(); self.model.setMinimumWidth(420)
+        saved=CONTROL.load(); idx=self.provider.findText(saved.get("ai_provider","triforce")); self.provider.setCurrentIndex(max(0,idx))
+        row=QHBoxLayout(); row.addWidget(QLabel("Provider")); row.addWidget(self.provider); row.addWidget(QLabel("Model")); row.addWidget(self.model)
+        status=QPushButton("Refresh models/status"); connect=QPushButton("Connect / Login"); save=QPushButton("Use selected model")
+        status.clicked.connect(self.provider_status); connect.clicked.connect(self.provider_connect); save.clicked.connect(self.save_ai_selection)
+        row.addWidget(status); row.addWidget(connect); row.addWidget(save); row.addStretch(); v.addLayout(row)
+        self.provider_output=QTextEdit(); self.provider_output.setReadOnly(True); v.addWidget(self.provider_output,1)
+        QTimer.singleShot(100, self.provider_status)
+        return w
+
+    def _settings_tab(self):
+        w=QWidget(); form=QFormLayout(w); saved=CONTROL.load()
+        self.preview_interval=QSpinBox(); self.preview_interval.setRange(250,5000); self.preview_interval.setValue(int(saved.get("preview_interval_ms",750)))
+        self.preview_size=QSpinBox(); self.preview_size.setRange(256,3000); self.preview_size.setValue(int(saved.get("preview_max",1200)))
+        save=QPushButton("Save settings"); save.clicked.connect(self.save_settings)
+        form.addRow("Live preview interval (ms)", self.preview_interval); form.addRow("Preview max size", self.preview_size); form.addRow(save)
+        return w
+
+    def save_settings(self):
+        data=CONTROL.load(); data.update({"preview_interval_ms":self.preview_interval.value(),"preview_max":self.preview_size.value()}); CONTROL.save(data); self.timer.setInterval(self.preview_interval.value())
+
+    def save_ai_selection(self):
+        data=CONTROL.load(); data["ai_provider"]=self.provider.currentText(); data["ai_model"]=self.model.currentData() or self.model.currentText(); CONTROL.save(data); self.provider_output.append(f"Selected: {data['ai_provider']} / {data['ai_model']}")
+
+    def _server_pid(self):
+        try:
+            pid=int(PIDFILE.read_text().strip()); os.kill(pid,0); return pid
+        except Exception: return None
+
+    def start_server(self):
+        if self._server_pid(): return
+        cmd=["uv","run","python","-c","from gimp_mcp.server import mcp; mcp.run(transport='streamable-http')"]
+        log=(STATE/"server.log").open("ab")
+        p=subprocess.Popen(cmd,cwd=str(Path.home()/"gimp-mcp"),stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+        PIDFILE.write_text(str(p.pid)); self.refresh()
+
+    def stop_server(self):
+        pid=self._server_pid()
+        if pid:
+            try: os.killpg(pid,signal.SIGTERM)
+            except ProcessLookupError: pass
+        PIDFILE.unlink(missing_ok=True); self.refresh()
+
+    def provider_status(self):
+        provider=self.provider.currentText()
+        if provider == "triforce":
+            code="from gimp_mcp.ai_control import AICoderAdapter; import json; a=AICoderAdapter(); print(json.dumps({'status':a.triforce_status(),'models':a.triforce_models()}, default=str))"
+        else:
+            code=f"from gimp_mcp.ai_control import AICoderAdapter; import json; a=AICoderAdapter(); print(json.dumps({{'status':[x for x in a.providers() if x.get('provider')=='{provider}'],'models':a.models('{provider}')}}, default=str))"
+        r=subprocess.run(["uv","run","python","-c",code],cwd=str(Path.home()/"gimp-mcp"),capture_output=True,text=True,timeout=45)
+        text=(r.stdout or r.stderr).strip(); self.provider_output.setPlainText(text); self.model.clear()
+        try:
+            payload=json.loads(r.stdout); models=payload.get("models") or []
+            for item in models:
+                if isinstance(item,dict):
+                    mid=str(item.get("id") or item.get("model") or item.get("name") or ""); label=str(item.get("display_name") or item.get("name") or mid); self.model.addItem(label,mid)
+                else: self.model.addItem(str(item),str(item))
+            wanted=CONTROL.load().get("ai_model","")
+            for i in range(self.model.count()):
+                if self.model.itemData(i)==wanted: self.model.setCurrentIndex(i); break
+        except Exception: pass
+
+    def provider_connect(self):
+        provider=self.provider.currentText()
+        if provider == "triforce":
+            self.provider_output.setPlainText("AILinux/TriForce login is shared with AICoder. Use AICoder login/setup, then refresh here."); return
+        code=f"from gimp_mcp.ai_control import AICoderAdapter; import json; print(json.dumps(AICoderAdapter().connect('{provider}', open_browser=True), default=str))"
+        subprocess.Popen(["uv","run","python","-c",code],cwd=str(Path.home()/"gimp-mcp"))
+        self.provider_output.setPlainText(f"Started official {provider} login flow. Complete it in the opened browser/terminal.")
+
+    def _session_changed(self, sid):
+        self._load_preview(sid)
+
+    def _load_preview(self, sid):
+        path=SESSIONS/sid/"preview.png"
+        if path.exists():
+            pix=QPixmap(str(path)); self.preview.setPixmap(pix.scaled(self.preview.size(),Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+        else: self.preview.setText("No preview yet for this session")
+
+    def refresh(self):
+        pid=self._server_pid(); self.server_status.setText(f"Server: {'RUNNING pid='+str(pid) if pid else 'STOPPED'}")
+        current=self.sessions.currentItem().text() if self.sessions.currentItem() else ""
+        ids=sorted([p.name for p in SESSIONS.iterdir() if p.is_dir() and (p/'document.xcf').exists()]) if SESSIONS.exists() else []
+        if [self.sessions.item(i).text() for i in range(self.sessions.count())] != ids:
+            self.sessions.clear(); self.sessions.addItems(ids)
+            if current in ids: self.sessions.setCurrentRow(ids.index(current))
+            elif ids: self.sessions.setCurrentRow(len(ids)-1)
+        if EVENTS.exists():
+            lines=EVENTS.read_text(encoding="utf-8",errors="replace").splitlines()[-80:]
+            pretty=[]
+            for line in lines:
+                try:
+                    e=json.loads(line); pretty.append(f"{e.get('type')}  {e.get('operation') or ''}  {e.get('session_id') or ''}  {e.get('status') or ''}  {e.get('duration_ms') or ''}")
+                except Exception: pass
+            self.log.setPlainText("\n".join(pretty)); self.log.moveCursor(self.log.textCursor().MoveOperation.End)
+        if self.sessions.currentItem(): self._load_preview(self.sessions.currentItem().text())
+
+
+def main():
+    app=QApplication(sys.argv); win=ControlCenter(); win.show(); return app.exec()
+
+if __name__ == "__main__": raise SystemExit(main())

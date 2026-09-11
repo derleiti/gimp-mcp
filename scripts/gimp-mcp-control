@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+cd "${GIMP_MCP_ROOT:-$HOME/gimp-mcp}"
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m gimp_mcp.gui "$@"
