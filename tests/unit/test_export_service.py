@@ -29,3 +29,12 @@ def test_raster_export_uses_gimp_operations_and_normalizes_suffix(tmp_path: Path
     assert result['format']=='jpg'
     assert Path(result['output']).suffix=='.jpg'
     assert len(ops.calls)==1
+
+def test_public_export_creates_three_opaque_links(tmp_path: Path):
+    from gimp_mcp.public_exports import PublicExportManager
+    doc=tmp_path/'document.xcf'; doc.write_bytes(b'xcf'); session=ArtworkSession('s',tmp_path,doc)
+    manager=PublicExportManager(tmp_path/'public',ExportService(DummyOps()),base_url='https://ailinux.me/gimp-mcp/download')
+    result=manager.publish(session,ttl=300)
+    assert set(result['links']) == {'xcf','jpg','png'}
+    for fmt,item in result['links'].items():
+        assert item['url'].startswith('https://ailinux.me/gimp-mcp/download/') and item['url'].endswith('/artwork.'+fmt)

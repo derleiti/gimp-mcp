@@ -20,6 +20,7 @@ def main() -> None:
     else:
         os.environ.pop("GIMP_MCP_AUTH_TOKEN", None)
         os.environ.pop("GIMP_MCP_RESOURCE_URL", None)
+    os.environ["GIMP_MCP_PUBLIC_EXPORT_BASE_URL"] = str(saved.get("public_export_base_url") or "https://ailinux.me/gimp-mcp/download")
     if saved.get("gimp_runtime") == "managed" and saved.get("managed_gimp_path"):
         os.environ["GIMP_MCP_GIMP"] = str(saved["managed_gimp_path"])
     from .server import mcp

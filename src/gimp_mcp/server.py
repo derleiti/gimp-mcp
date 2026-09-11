@@ -22,6 +22,7 @@ from .prompt_runner import PromptRunner
 from .studio_mcp_client import StudioMcpClient
 from .vision import VisionRenderer
 from .control_settings import ControlSettings
+from .public_exports import PublicExportManager
 
 settings = Settings()
 policy = PathPolicy(settings.allowed_roots)
@@ -29,6 +30,7 @@ bridge = GimpBridge(settings.gimp_executable, settings.timeout)
 sessions = SessionManager(settings.session_root)
 ops = GimpOperations(bridge, sessions)
 exports = ExportService(ops)
+public_exports = PublicExportManager(settings.state_dir / "public-exports", exports, base_url=os.getenv("GIMP_MCP_PUBLIC_EXPORT_BASE_URL", "https://ailinux.me/gimp-mcp/download"), ttl=int(os.getenv("GIMP_MCP_PUBLIC_EXPORT_TTL", "86400")))
 live_bridge = LiveBridge()
 events = EventBus(settings.state_dir / "events.jsonl")
 providers = ProviderManager()
@@ -277,6 +279,17 @@ def export_artwork(session_id: str, output_path: str, format: Literal['xcf','png
         return _ok(exports.export(s,dst,format,overwrite=overwrite))
     except GimpMcpError as exc:
         return exc.as_dict()
+@mcp.tool()
+def publish_artwork_downloads(session_id: str, ttl_seconds: int = 86400) -> dict[str, Any]:
+    """Export the final artwork to XCF, JPEG and PNG and return three expiring HTTPS download links for external/autonomous clients."""
+    try:
+        s=sessions.get(session_id)
+        return _ok(public_exports.publish(s, ttl=max(300,min(int(ttl_seconds),604800))))
+    except GimpMcpError as exc:
+        return exc.as_dict()
+    except Exception as exc:
+        return {'ok':False,'error':{'code':'PUBLIC_EXPORT_FAILED','message':str(exc),'recoverable':True}}
+
 def _capture_vision_artifacts(s, *, grid_px: int = 64, show_layer_bounds: bool = True, show_labels: bool = True, show_centers: bool = True, update_timeline: bool = True) -> dict[str, Any]:
     preview=s.workdir/'preview.png'; live_path=s.workdir/'vision-live.png'; source='session-xcf'; live_info=None
     live=live_bridge.status()

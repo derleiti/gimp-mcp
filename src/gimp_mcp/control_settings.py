@@ -20,6 +20,7 @@ DEFAULTS = {
     "mcp_network_host": "0.0.0.0",
     "mcp_require_auth": True,
     "mcp_auth_token": "",
+    "public_export_base_url": "https://ailinux.me/gimp-mcp/download",
     "creative_budget": "effectively_unlimited",
     "max_steps_per_batch": 20,
     "provider_planning_timeout": 600,
