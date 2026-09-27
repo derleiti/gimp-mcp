@@ -66,3 +66,41 @@ def test_triforce_models_normalizes_string_catalog(monkeypatch):
     assert rows[0]["model"] == "openai/test"
     assert rows[0]["id"] == "openai/test"
     assert rows[1]["model"] == "other/test"
+
+
+def test_grok_models_parse_official_cli_catalog(monkeypatch):
+    import subprocess
+    manager=ProviderManager()
+    monkeypatch.setattr(manager, "_candidate", lambda name: "/usr/bin/grok" if name == "grok" else None)
+    sample="""You are logged in with grok.com.\n\nDefault model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n  * grok-4.6\n"""
+    monkeypatch.setattr(manager, "_run", lambda *a, **k: subprocess.CompletedProcess(a[0],0,sample,""))
+    rows=manager.models("grok")
+    assert [x["id"] for x in rows] == ["account:grok/grok-4.7", "account:grok/grok-4.6"]
+    assert rows[0]["is_default"] is True
+
+
+def test_grok_status_is_authenticated_when_catalog_is_available(monkeypatch):
+    manager=ProviderManager()
+    monkeypatch.setattr(manager, "_candidate", lambda name: "/usr/bin/grok" if name == "grok" else None)
+    monkeypatch.setattr(manager, "_grok_models", lambda timeout=20: [{"model":"grok-4.7"}])
+    row=manager.provider_status("grok")
+    assert row["installed"] is True and row["authenticated"] is True
+    assert row["display"] == "Grok / xAI"
+
+
+def test_grok_account_model_prefix_is_stripped():
+    assert ProviderManager._strip_account_model("grok", "account:grok/grok-4.7") == "grok-4.7"
+
+
+def test_grok_chat_classifies_quota_failure(monkeypatch):
+    import subprocess
+    manager=ProviderManager()
+    monkeypatch.setattr(manager, "_candidate", lambda name: "/usr/bin/grok" if name == "grok" else None)
+    monkeypatch.setattr(manager, "_status_grok", lambda: {"authenticated": True})
+    monkeypatch.setattr(manager, "_run", lambda *a, **k: subprocess.CompletedProcess(a[0],1,"","usage limit reached"))
+    try:
+        manager.chat("grok","account:grok/grok-4.7","x","y",timeout=10)
+    except Exception as exc:
+        assert "usage/rate limit" in str(exc)
+    else:
+        raise AssertionError("quota failure must be classified")

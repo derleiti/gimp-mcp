@@ -371,3 +371,21 @@ def test_next_batch_receives_current_document_inventory(tmp_path: Path):
         return {'ok':True,'data':{}}
     job=PromptRunner(jobs,ai_chat,tool_call,vision_review_every_batches=0).run(jobs.create('x','triforce','m'))
     assert job.status=='completed' and len(prompts)==2
+
+
+def test_parse_plan_accepts_extended_document_and_text_tools():
+    raw=json.dumps({"goal":"edit","outcome":"done","steps":[
+        {"tool":"document_autocrop","arguments":{},"reason":"trim"},
+        {"tool":"text_update","arguments":{"layer_id":"$last_layer_id","text":"Updated","color":"#ff0000"},"reason":"edit text"}
+    ]})
+    parsed=parse_plan(raw)
+    assert [x["tool"] for x in parsed["steps"]] == ["document_autocrop","text_update"]
+
+
+def test_parse_plan_rejects_invalid_extended_selection_and_empty_text_update():
+    bad_selection=json.dumps({"goal":"x","steps":[{"tool":"selection_set","arguments":{"action":"triangle"},"reason":"bad"}]})
+    with pytest.raises(PlanError,match="unsupported action"):
+        parse_plan(bad_selection)
+    empty_text=json.dumps({"goal":"x","steps":[{"tool":"text_update","arguments":{"layer_id":1},"reason":"bad"}]})
+    with pytest.raises(PlanError,match="requires at least one property"):
+        parse_plan(empty_text)

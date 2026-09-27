@@ -81,6 +81,41 @@ class GimpOperations:
     def document_info(self, s: ArtworkSession) -> dict[str, Any]:
         return self.bridge.run_json(_load(s.document) + "layers=img.get_layers()\nitems=[]\nfor x in layers:\n ok,ox,oy=x.get_offsets()\n Gimp.Selection.none(img)\n selected=img.select_item(Gimp.ChannelOps.REPLACE,x)\n bok,non_empty,x1,y1,x2,y2=Gimp.Selection.bounds(img)\n items.append({'layer_id':int(x.get_tattoo()),'name':x.get_name(),'x':int(ox) if ok else 0,'y':int(oy) if ok else 0,'width':x.get_width(),'height':x.get_height(),'content_x':int(x1) if bok and non_empty else None,'content_y':int(y1) if bok and non_empty else None,'content_width':int(x2-x1) if bok and non_empty else 0,'content_height':int(y2-y1) if bok and non_empty else 0,'visible':x.get_visible(),'opacity':x.get_opacity()})\nGimp.Selection.none(img)\nresult={'width':img.get_width(),'height':img.get_height(),'layer_count':len(layers),'layers':items}\nimg.delete()\n")
 
+    def document_resize(self, s: ArtworkSession, width: int, height: int, offset_x: int = 0, offset_y: int = 0) -> dict[str, Any]:
+        if not (1 <= int(width) <= 20000 and 1 <= int(height) <= 20000):
+            raise GimpMcpError('INVALID_ARGUMENT', 'width and height must be within 1..20000', False)
+        body = _load(s.document)
+        body += f"w={int(width)};h={int(height)};ox={int(offset_x)};oy={int(offset_y)}\nimg.resize(w,h,ox,oy)\n"
+        body += _save(s.document) + "result={'width':img.get_width(),'height':img.get_height(),'offset_x':ox,'offset_y':oy}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def document_scale(self, s: ArtworkSession, width: int, height: int) -> dict[str, Any]:
+        if not (1 <= int(width) <= 20000 and 1 <= int(height) <= 20000):
+            raise GimpMcpError('INVALID_ARGUMENT', 'width and height must be within 1..20000', False)
+        body = _load(s.document)
+        body += f"w={int(width)};h={int(height)}\nimg.scale(w,h)\n"
+        body += _save(s.document) + "result={'width':img.get_width(),'height':img.get_height()}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def document_crop(self, s: ArtworkSession, width: int, height: int, x: int = 0, y: int = 0) -> dict[str, Any]:
+        if int(width) <= 0 or int(height) <= 0 or int(x) < 0 or int(y) < 0:
+            raise GimpMcpError('INVALID_ARGUMENT', 'crop width/height must be positive and x/y non-negative', False)
+        body = _load(s.document)
+        body += f"w={int(width)};h={int(height)};x={int(x)};y={int(y)}\n"
+        body += "if x+w>img.get_width() or y+h>img.get_height(): raise RuntimeError('CROP_OUT_OF_BOUNDS')\nimg.crop(w,h,x,y)\n"
+        body += _save(s.document) + "result={'width':img.get_width(),'height':img.get_height(),'x':x,'y':y}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def document_autocrop(self, s: ArtworkSession, layer_id: int | None = None) -> dict[str, Any]:
+        body = _load(s.document)
+        if layer_id is None:
+            body += "layers=img.get_layers()\nif not layers: raise RuntimeError('NO_LAYERS')\ndrawable=layers[0]\n"
+        else:
+            body += _layer_lookup(int(layer_id)) + "drawable=layer\n"
+        body += "pdb=Gimp.get_pdb();proc=pdb.lookup_procedure('gimp-image-autocrop')\nif proc is None: raise RuntimeError('AUTOCROP_MISSING')\nconfig=proc.create_config();config.set_property('image',img);config.set_property('drawable',drawable);proc.run(config)\n"
+        body += _save(s.document) + "result={'width':img.get_width(),'height':img.get_height()}\nimg.delete()\n"
+        return self._mutate(s, body)
+
     def shape_create(self, s: ArtworkSession, name: str, shape: str, x: float, y: float, width: float, height: float, color: str) -> dict[str, Any]:
         shape = str(shape).strip().lower()
         if shape not in {"ellipse", "rectangle"}:
@@ -118,10 +153,64 @@ class GimpOperations:
         body = _load(s.document) + _layer_lookup(layer_id) + "name=layer.get_name();img.remove_layer(layer)\n" + _save(s.document) + "result={'deleted':True,'layer_id':layer_id,'name':name}\nimg.delete()\n"
         return self._mutate(s, body)
 
-    def layer_set(self, s: ArtworkSession, layer_id: int, *, name: str | None = None, visible: bool | None = None, opacity: float | None = None) -> dict[str, Any]:
+    def layer_duplicate(self, s: ArtworkSession, layer_id: int, name: str | None = None) -> dict[str, Any]:
+        tattoo = random.randint(100000, 2_000_000_000)
+        body = _load(s.document) + _layer_lookup(layer_id)
+        body += f"new_name={_q(name or '')};tattoo={tattoo}\nposition=list(img.get_layers()).index(layer)\ndup=layer.copy()\nif dup is None: raise RuntimeError('LAYER_COPY_FAILED')\ndup.set_tattoo(tattoo)\nif new_name: dup.set_name(new_name)\nimg.insert_layer(dup,None,position)\n"
+        body += _save(s.document) + "ok,ox,oy=dup.get_offsets()\nresult={'layer_id':tattoo,'name':dup.get_name(),'x':int(ox) if ok else 0,'y':int(oy) if ok else 0,'width':dup.get_width(),'height':dup.get_height()}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def layer_resize(self, s: ArtworkSession, layer_id: int, width: int, height: int, offset_x: int = 0, offset_y: int = 0) -> dict[str, Any]:
+        if int(width) <= 0 or int(height) <= 0:
+            raise GimpMcpError('INVALID_ARGUMENT', 'layer width/height must be positive', False)
+        body = _load(s.document) + _layer_lookup(layer_id)
+        body += f"w={int(width)};h={int(height)};ox={int(offset_x)};oy={int(offset_y)}\nlayer.resize(w,h,ox,oy)\n"
+        body += _save(s.document) + "result={'layer_id':layer_id,'width':layer.get_width(),'height':layer.get_height()}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def layer_resize_to_image(self, s: ArtworkSession, layer_id: int) -> dict[str, Any]:
+        body = _load(s.document) + _layer_lookup(layer_id)
+        body += "layer.resize_to_image_size()\n" + _save(s.document)
+        body += "result={'layer_id':layer_id,'width':layer.get_width(),'height':layer.get_height()}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def layer_add_alpha(self, s: ArtworkSession, layer_id: int) -> dict[str, Any]:
+        body = _load(s.document) + _layer_lookup(layer_id)
+        body += "before=layer.has_alpha();layer.add_alpha();after=layer.has_alpha()\n" + _save(s.document)
+        body += "result={'layer_id':layer_id,'had_alpha':bool(before),'has_alpha':bool(after)}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def layer_merge_down(self, s: ArtworkSession, layer_id: int, merge_type: str = 'expand') -> dict[str, Any]:
+        modes={'expand':'EXPAND_AS_NECESSARY','clip-image':'CLIP_TO_IMAGE','clip-bottom':'CLIP_TO_BOTTOM_LAYER'}
+        key=str(merge_type or 'expand').strip().lower().replace('_','-')
+        if key not in modes:
+            raise GimpMcpError('INVALID_ARGUMENT', 'merge_type must be expand, clip-image, or clip-bottom', False)
+        tattoo=random.randint(100000,2_000_000_000)
+        body=_load(s.document)+_layer_lookup(layer_id)+f"mode=Gimp.MergeType.{modes[key]};tattoo={tattoo}\n"
+        body += "merged=img.merge_down(layer,mode)\nif merged is None: raise RuntimeError('MERGE_DOWN_FAILED')\nmerged.set_tattoo(tattoo)\n"
+        body += _save(s.document) + "result={'layer_id':tattoo,'name':merged.get_name(),'merge_type':"+_q(key)+"}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def layers_merge_visible(self, s: ArtworkSession, merge_type: str = 'expand') -> dict[str, Any]:
+        modes={'expand':'EXPAND_AS_NECESSARY','clip-image':'CLIP_TO_IMAGE','clip-bottom':'CLIP_TO_BOTTOM_LAYER'}
+        key=str(merge_type or 'expand').strip().lower().replace('_','-')
+        if key not in modes:
+            raise GimpMcpError('INVALID_ARGUMENT', 'merge_type must be expand, clip-image, or clip-bottom', False)
+        tattoo=random.randint(100000,2_000_000_000)
+        body=_load(s.document)+f"mode=Gimp.MergeType.{modes[key]};tattoo={tattoo}\nmerged=img.merge_visible_layers(mode)\nif merged is None: raise RuntimeError('MERGE_VISIBLE_FAILED')\nmerged.set_tattoo(tattoo)\n"
+        body += _save(s.document) + "result={'layer_id':tattoo,'name':merged.get_name(),'layer_count':len(img.get_layers()),'merge_type':"+_q(key)+"}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def document_flatten(self, s: ArtworkSession) -> dict[str, Any]:
+        tattoo=random.randint(100000,2_000_000_000)
+        body=_load(s.document)+f"tattoo={tattoo}\nmerged=img.flatten()\nif merged is None: raise RuntimeError('FLATTEN_FAILED')\nmerged.set_tattoo(tattoo)\n"
+        body += _save(s.document) + "result={'layer_id':tattoo,'name':merged.get_name(),'layer_count':len(img.get_layers())}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def layer_set(self, s: ArtworkSession, layer_id: int, *, name: str | None = None, visible: bool | None = None, opacity: float | None = None, x: int | None = None, y: int | None = None, blend_mode: str | None = None, lock_alpha: bool | None = None) -> dict[str, Any]:
         if opacity is not None and not 0 <= opacity <= 100:
             raise GimpMcpError('INVALID_ARGUMENT', 'opacity must be 0..100', False)
-        if self._live_ready():
+        if self._live_ready() and x is None and y is None and blend_mode is None and lock_alpha is None:
             with s.lock:
                 snap = self.sessions.snapshot(s)
                 try:
@@ -137,7 +226,15 @@ class GimpOperations:
         if name is not None: body += f"layer.set_name({_q(name)})\n"
         if visible is not None: body += f"layer.set_visible({bool(visible)})\n"
         if opacity is not None: body += f"layer.set_opacity({float(opacity)})\n"
-        body += _save(s.document) + "result={'layer_id':layer_id,'name':layer.get_name(),'visible':layer.get_visible(),'opacity':layer.get_opacity()}\nimg.delete()\n"
+        if x is not None or y is not None:
+            body += "ok,curx,cury=layer.get_offsets()\n"
+            body += f"layer.set_offsets({int(x) if x is not None else 'int(curx)'},{int(y) if y is not None else 'int(cury)'})\n"
+        if blend_mode is not None:
+            aliases={'normal':'NORMAL','multiply':'MULTIPLY','screen':'SCREEN','overlay':'OVERLAY','addition':'ADDITION','subtract':'SUBTRACT','darken':'DARKEN_ONLY','lighten':'LIGHTEN_ONLY'}
+            key=str(blend_mode).strip().lower().replace('-','_').replace(' ','_'); enum_name=aliases.get(key,key.upper())
+            body += f"mode=getattr(Gimp.LayerMode,{_q(enum_name)},None)\nif mode is None: raise RuntimeError('UNSUPPORTED_BLEND_MODE:'+{_q(enum_name)})\nlayer.set_mode(mode)\n"
+        if lock_alpha is not None: body += f"layer.set_lock_alpha({bool(lock_alpha)})\n"
+        body += _save(s.document) + "ok,ox,oy=layer.get_offsets()\nresult={'layer_id':layer_id,'name':layer.get_name(),'visible':layer.get_visible(),'opacity':layer.get_opacity(),'x':int(ox) if ok else 0,'y':int(oy) if ok else 0,'blend_mode':str(layer.get_mode().value_nick),'lock_alpha':bool(layer.get_lock_alpha())}\nimg.delete()\n"
         return self._mutate(s, body)
 
     def layer_fill(self, s: ArtworkSession, layer_id: int, color: str) -> dict[str, Any]:
@@ -157,22 +254,85 @@ class GimpOperations:
         return self._mutate(s, body)
 
     def selection(self, s: ArtworkSession, action: str, **kwargs: Any) -> dict[str, Any]:
+        action=str(action).strip().lower().replace('_','-')
         body = _load(s.document)
         if action == 'none': body += "ok=Gimp.Selection.none(img)\n"
         elif action == 'all': body += "ok=Gimp.Selection.all(img)\n"
         elif action == 'invert': body += "ok=Gimp.Selection.invert(img)\n"
-        elif action == 'rectangle': body += f"ok=img.select_rectangle(Gimp.ChannelOps.REPLACE,{float(kwargs['x'])},{float(kwargs['y'])},{float(kwargs['width'])},{float(kwargs['height'])})\n"
+        elif action in {'rectangle','ellipse'}:
+            op_name=str(kwargs.get('operation','replace')).strip().lower()
+            op_map={'replace':'REPLACE','add':'ADD','subtract':'SUBTRACT','intersect':'INTERSECT'}
+            if op_name not in op_map: raise GimpMcpError('INVALID_ARGUMENT','selection operation must be replace/add/subtract/intersect',False)
+            x=float(kwargs.get('x',0)); y=float(kwargs.get('y',0)); w=float(kwargs.get('width',0)); h=float(kwargs.get('height',0))
+            if w <= 0 or h <= 0: raise GimpMcpError('INVALID_ARGUMENT','selection width/height must be positive',False)
+            method='select_rectangle' if action=='rectangle' else 'select_ellipse'
+            body += f"ok=img.{method}(Gimp.ChannelOps.{op_map[op_name]},{x},{y},{w},{h})\n"
+        elif action == 'polygon':
+            op_name=str(kwargs.get('operation','replace')).strip().lower()
+            op_map={'replace':'REPLACE','add':'ADD','subtract':'SUBTRACT','intersect':'INTERSECT'}
+            if op_name not in op_map: raise GimpMcpError('INVALID_ARGUMENT','selection operation must be replace/add/subtract/intersect',False)
+            points=kwargs.get('points')
+            if not isinstance(points,(list,tuple)) or len(points) < 6 or len(points) % 2 or any(not isinstance(v,(int,float)) or isinstance(v,bool) for v in points):
+                raise GimpMcpError('INVALID_ARGUMENT','polygon points must be [x1,y1,x2,y2,x3,y3,...]',False)
+            body += f"ok=img.select_polygon(Gimp.ChannelOps.{op_map[op_name]},{[float(v) for v in points]!r})\n"
+        elif action == 'feather': body += f"ok=Gimp.Selection.feather(img,{float(kwargs.get('radius',0))})\n"
+        elif action == 'grow': body += f"ok=Gimp.Selection.grow(img,{int(kwargs.get('steps',0))})\n"
+        elif action == 'shrink': body += f"ok=Gimp.Selection.shrink(img,{int(kwargs.get('steps',0))})\n"
+        elif action == 'border': body += f"ok=Gimp.Selection.border(img,{int(kwargs.get('radius',0))})\n"
+        elif action == 'translate': body += f"ok=Gimp.Selection.translate(img,{int(kwargs.get('dx',0))},{int(kwargs.get('dy',0))})\n"
         else: raise GimpMcpError('UNSUPPORTED_OPERATION', f'Unknown selection action: {action}', False)
         body += _save(s.document) + f"result={{'action':{_q(action)},'ok':bool(ok)}}\nimg.delete()\n"
         return self._mutate(s, body)
 
-    def text_create(self, s: ArtworkSession, text: str, x: float, y: float, size: float, font_name: str = 'Sans') -> dict[str, Any]:
+    def guide_add(self, s: ArtworkSession, orientation: str, position: int) -> dict[str, Any]:
+        orientation=str(orientation).strip().lower()
+        if orientation not in {'horizontal','vertical'}:
+            raise GimpMcpError('INVALID_ARGUMENT','orientation must be horizontal or vertical',False)
+        body=_load(s.document)+f"position={int(position)}\n"
+        body += "guide=img.add_hguide(position)\n" if orientation=='horizontal' else "guide=img.add_vguide(position)\n"
+        body += _save(s.document) + f"result={{'guide_id':int(guide),'orientation':{_q(orientation)},'position':position}}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def guide_list(self, s: ArtworkSession) -> dict[str, Any]:
+        body = _load(s.document)
+        body += "items=[];gid=img.find_next_guide(0)\n"
+        body += "while gid:\n orient=img.get_guide_orientation(gid);pos=img.get_guide_position(gid);items.append({'guide_id':int(gid),'orientation':str(orient.value_nick),'position':int(pos)});gid=img.find_next_guide(gid)\n"
+        body += "result={'count':len(items),'guides':items}\nimg.delete()\n"
+        return self.bridge.run_json(body)
+
+    def guide_delete(self, s: ArtworkSession, guide_id: int) -> dict[str, Any]:
+        body=_load(s.document)+f"gid={int(guide_id)};img.delete_guide(gid)\n"+_save(s.document)+"result={'deleted':True,'guide_id':gid}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def import_layer(self, s: ArtworkSession, source: Path, name: str | None = None) -> dict[str, Any]:
+        tattoo=random.randint(100000,2_000_000_000)
+        body=_load(s.document)+f"source={_q(source)};new_name={_q(name or '')};tattoo={tattoo}\npdb=Gimp.get_pdb();proc=pdb.lookup_procedure('gimp-file-load-layer')\nif proc is None: raise RuntimeError('GIMP_FILE_LOAD_LAYER_MISSING')\nconfig=proc.create_config();config.set_property('run-mode',Gimp.RunMode.NONINTERACTIVE);config.set_property('image',img);config.set_property('file',Gio.File.new_for_path(source))\nret=proc.run(config)\nlayer=ret.index(1) if ret.length()>1 else None\nif layer is None: raise RuntimeError('IMPORT_LAYER_FAILED')\nlayer.set_tattoo(tattoo)\nif new_name: layer.set_name(new_name)\nimg.insert_layer(layer,None,0)\n"
+        body += _save(s.document)+"ok,ox,oy=layer.get_offsets()\nresult={'layer_id':tattoo,'name':layer.get_name(),'x':int(ox) if ok else 0,'y':int(oy) if ok else 0,'width':layer.get_width(),'height':layer.get_height(),'source':source}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def text_create(self, s: ArtworkSession, text: str, x: float, y: float, size: float, font_name: str = 'Sans', color: str | None = None) -> dict[str, Any]:
         if not 1 <= size <= 2000: raise GimpMcpError('INVALID_ARGUMENT', 'font size must be 1..2000 px', False)
+        if color is not None and (not str(color).strip() or len(str(color)) > 128):
+            raise GimpMcpError('INVALID_ARGUMENT', 'invalid text color', False)
         tattoo = random.randint(100000, 2_000_000_000)
-        body = _load(s.document) + f"text={_q(text)};font_name={_q(font_name)};size={float(size)};x={float(x)};y={float(y)};tattoo={tattoo}\n"
+        body = _load(s.document) + f"text={_q(text)};font_name={_q(font_name)};size={float(size)};x={float(x)};y={float(y)};tattoo={tattoo};color_text={_q(color or '')}\n"
         body += "font=Gimp.Font.get_by_name(font_name)\nif font is None:\n font=Gimp.context_get_font()\nif font is None: raise RuntimeError('FONT_NOT_FOUND')\n"
-        body += "img.undo_group_start()\nlayer=Gimp.TextLayer.new(img,text,font,size,Gimp.Unit.pixel());layer.set_tattoo(tattoo);img.insert_layer(layer,None,0);layer.set_offsets(int(x),int(y));img.undo_group_end()\n"
-        body += _save(s.document) + "result={'layer_id':tattoo,'text':text,'font':font_name,'size':size,'x':x,'y':y}\nimg.delete()\n"
+        body += "img.undo_group_start()\nlayer=Gimp.TextLayer.new(img,text,font,size,Gimp.Unit.pixel());layer.set_tattoo(tattoo);img.insert_layer(layer,None,0);layer.set_offsets(int(x),int(y))\nif color_text: layer.set_color(Gegl.Color.new(color_text))\nimg.undo_group_end()\n"
+        body += _save(s.document) + "result={'layer_id':tattoo,'text':text,'font':font_name,'size':size,'x':x,'y':y,'color':color_text or None}\nimg.delete()\n"
+        return self._mutate(s, body)
+
+    def text_update(self, s: ArtworkSession, layer_id: int, *, text: str | None = None, size: float | None = None, font_name: str | None = None, color: str | None = None) -> dict[str, Any]:
+        if size is not None and not 1 <= float(size) <= 2000:
+            raise GimpMcpError('INVALID_ARGUMENT', 'font size must be 1..2000 px', False)
+        body = _load(s.document) + _layer_lookup(layer_id)
+        body += "if not isinstance(layer,Gimp.TextLayer): raise RuntimeError('NOT_TEXT_LAYER')\n"
+        if text is not None: body += f"layer.set_text({_q(text)})\n"
+        if font_name is not None:
+            body += f"font=Gimp.Font.get_by_name({_q(font_name)})\nif font is None: raise RuntimeError('FONT_NOT_FOUND')\nlayer.set_font(font)\n"
+        if size is not None: body += f"layer.set_font_size({float(size)},Gimp.Unit.pixel())\n"
+        if color is not None: body += f"layer.set_color(Gegl.Color.new({_q(color)}))\n"
+        body += _save(s.document)
+        body += "size_info=layer.get_font_size();size_px=float(size_info[0]) if isinstance(size_info,(tuple,list)) else float(size_info)\nresult={'layer_id':layer_id,'text':layer.get_text(),'size':size_px,'font':layer.get_font().get_name() if layer.get_font() else None}\nimg.delete()\n"
         return self._mutate(s, body)
 
     @staticmethod
@@ -327,24 +487,70 @@ class GimpOperations:
         return self.bridge.run_json(f"q={_q(query.lower())};limit={max(1,min(limit,500))}\npdb=Gimp.get_pdb();names=list(pdb.query_procedures('.*','.*','.*','.*','.*','.*','.*','.*'));items=[n for n in names if q in n.lower()];result={{'count':len(items),'procedures':items[:limit]}}\n")
 
     def pdb_call(self, s: ArtworkSession, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Call a GIMP PDB procedure with JSON-safe arguments and session image/layer references."""
+        """Call a GIMP PDB procedure with typed JSON-safe argument coercion.
+
+        JSON primitives pass through. Session image references bind automatically;
+        item-like values use persistent tattoo IDs; colors accept CSS/Gegl strings;
+        enum values accept their normal symbolic names; common GIMP resources accept
+        resource names. GFile remains sandboxed to the session workdir.
+        """
         if not isinstance(arguments, dict):
             raise GimpMcpError('INVALID_ARGUMENT', 'arguments must be an object', False)
         body = _load(s.document) + f"name={_q(name)};args=json.loads({_q(json.dumps(arguments, ensure_ascii=False))});session_root={_q(s.workdir.resolve())}\n"
         body += "pdb=Gimp.get_pdb();proc=pdb.lookup_procedure(name)\nif proc is None: raise RuntimeError('PDB_PROCEDURE_NOT_FOUND:'+name)\nconfig=proc.create_config();specs={x.name:x for x in proc.get_arguments()}\n"
         body += "unknown=sorted(set(args)-set(specs))\nif unknown: raise RuntimeError('UNKNOWN_PDB_ARGUMENTS:'+','.join(unknown))\n"
         body += (
+            "def _all_layers(items):\n"
+            " out=[]\n"
+            " for item in items:\n"
+            "  out.append(item)\n"
+            "  try:\n"
+            "   children=item.get_children()\n"
+            "   if children: out.extend(_all_layers(children))\n"
+            "  except Exception: pass\n"
+            " return out\n"
+            "def _by_tattoo(items,tattoo):\n"
+            " for item in items:\n"
+            "  try:\n"
+            "   if int(item.get_tattoo())==tattoo: return item\n"
+            "  except Exception: pass\n"
+            " return None\n"
+            "all_layers=_all_layers(list(img.get_layers()))\n"
             "for key,value in args.items():\n"
             " spec=specs[key];tn=spec.value_type.name\n"
             " if tn=='GimpImage': value=img\n"
-            " elif tn in ('GimpDrawable','GimpLayer','GimpItem'):\n"
-            "  lid=int(value);value=next((x for x in img.get_layers() if int(x.get_tattoo())==lid),None)\n"
-            "  if value is None: raise RuntimeError('LAYER_NOT_FOUND:'+str(lid))\n"
+            " elif tn in ('GimpDrawable','GimpLayer','GimpItem','GimpTextLayer','GimpVectorLayer','GimpGroupLayer','GimpLinkLayer','GimpRasterizable'):\n"
+            "  lid=int(value);value=_by_tattoo(all_layers,lid)\n"
+            "  if value is None: raise RuntimeError('ITEM_NOT_FOUND:'+str(lid))\n"
+            " elif tn in ('GimpChannel','GimpLayerMask'):\n"
+            "  iid=int(value);pool=list(img.get_channels())+all_layers;value=_by_tattoo(pool,iid)\n"
+            "  if value is None: raise RuntimeError('CHANNEL_OR_MASK_NOT_FOUND:'+str(iid))\n"
+            " elif tn=='GimpPath':\n"
+            "  iid=int(value);value=_by_tattoo(list(img.get_paths()),iid)\n"
+            "  if value is None: raise RuntimeError('PATH_NOT_FOUND:'+str(iid))\n"
             " elif tn=='GFile':\n"
             "  candidate=os.path.realpath(os.path.expanduser(str(value)))\n"
             "  if os.path.commonpath([session_root,candidate]) != session_root: raise RuntimeError('PDB_GFILE_OUTSIDE_SESSION_WORKDIR')\n"
             "  value=Gio.File.new_for_path(candidate)\n"
-            " elif tn=='GimpRunMode': value=getattr(Gimp.RunMode,str(value).upper(),Gimp.RunMode.NONINTERACTIVE)\n"
+            " elif tn=='GimpRunMode': value=getattr(Gimp.RunMode,str(value).upper().replace('-','_'),Gimp.RunMode.NONINTERACTIVE)\n"
+            " elif tn=='GeglColor':\n"
+            "  value=Gegl.Color.new(str(value))\n"
+            "  if value is None: raise RuntimeError('INVALID_COLOR')\n"
+            " elif tn in ('GimpBrush','GimpFont','GimpGradient','GimpPalette','GimpPattern'):\n"
+            "  cls=getattr(Gimp,tn[4:]);value=cls.get_by_name(str(value))\n"
+            "  if value is None: raise RuntimeError('RESOURCE_NOT_FOUND:'+tn+':'+str(args[key]))\n"
+            " elif tn.startswith('Gimp') and isinstance(value,str):\n"
+            "  cls=getattr(Gimp,tn[4:],None)\n"
+            "  if cls is not None:\n"
+            "   enum_name=value.strip().upper().replace('-','_').replace(' ','_')\n"
+            "   candidate=getattr(cls,enum_name,None)\n"
+            "   if candidate is not None: value=candidate\n"
+            " elif tn.startswith('Gegl') and isinstance(value,str):\n"
+            "  cls=getattr(Gegl,tn[4:],None)\n"
+            "  if cls is not None:\n"
+            "   enum_name=value.strip().upper().replace('-','_').replace(' ','_')\n"
+            "   candidate=getattr(cls,enum_name,None)\n"
+            "   if candidate is not None: value=candidate\n"
             " config.set_property(key,value)\n"
         )
         body += "ret=proc.run(config);vals=[]\nfor i in range(ret.length()):\n v=ret.index(i);vals.append(v if isinstance(v,(str,int,float,bool,type(None))) else str(v))\n"

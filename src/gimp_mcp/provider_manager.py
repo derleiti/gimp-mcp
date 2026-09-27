@@ -22,6 +22,7 @@ _PROVIDER_LABELS = {
     "claude": "Claude / Anthropic",
     "gemini": "Google Antigravity",
     "mistral": "Mistral Vibe",
+    "grok": "Grok / xAI",
     "triforce": "AILinux / TriForce",
 }
 
@@ -65,7 +66,7 @@ class ProviderManager:
         for key in (
             "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BASE_URL", "MISTRAL_API_KEY", "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
+            "GOOGLE_API_KEY", "XAI_API_KEY",
         ):
             env.pop(key, None)
         return env
@@ -129,7 +130,7 @@ class ProviderManager:
                 raise ProviderError(f"Codex app-server timed out waiting for {method}")
 
             send({"id": 1, "method": "initialize", "params": {
-                "clientInfo": {"name": "gimp-mcp", "version": "0.4.0"},
+                "clientInfo": {"name": "gimp-mcp", "version": "0.5.0"},
                 "capabilities": {},
             }})
             receive(1)
@@ -188,6 +189,44 @@ class ProviderManager:
         return self._status("mistral", installed=True, authenticated=configured,
                             detail="Vibe configured; credentials remain provider-owned" if configured else "Run Vibe setup")
 
+    def _grok_models(self, *, timeout: int = 20) -> list[dict[str, Any]]:
+        exe = self._candidate("grok")
+        if not exe:
+            return []
+        r = self._run([exe, "models"], timeout=timeout)
+        text = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+        if r.returncode != 0 or "not authenticated" in text.lower() or "login" in text.lower() and "logged in" not in text.lower():
+            return []
+        rows: list[dict[str, Any]] = []
+        default_model = ""
+        for line in (r.stdout or "").splitlines():
+            raw = line.strip().lstrip("*-• ").strip()
+            low = raw.lower()
+            if low.startswith("default model:"):
+                default_model = raw.split(":", 1)[1].strip()
+                continue
+            if not raw or low.startswith(("available models:", "you are logged in")):
+                continue
+            slug = raw.split()[0]
+            if slug.startswith("grok-"):
+                rows.append({
+                    "provider": "grok", "model": slug,
+                    "id": f"account:grok/{slug}", "display": raw,
+                    "is_default": slug == default_model,
+                })
+        return rows
+
+    def _status_grok(self) -> dict[str, Any]:
+        exe = self._candidate("grok")
+        if not exe:
+            return self._status("grok", installed=False, authenticated=False, detail="Grok Build CLI not installed")
+        rows = self._grok_models(timeout=10)
+        authenticated = bool(rows)
+        return self._status(
+            "grok", installed=True, authenticated=authenticated,
+            detail=(f"Connected · {len(rows)} model(s)" if authenticated else "Run Grok OAuth login"),
+        )
+
     @staticmethod
     def _status(provider: str, *, installed: bool, authenticated: bool, detail: str) -> dict[str, Any]:
         return {
@@ -205,11 +244,12 @@ class ProviderManager:
         if provider == "claude": return self._status_claude()
         if provider == "gemini": return self._status_gemini()
         if provider == "mistral": return self._status_mistral()
+        if provider == "grok": return self._status_grok()
         if provider == "triforce": return self.triforce_status()
         raise ProviderError(f"Unknown provider: {provider}")
 
     def providers(self) -> list[dict[str, Any]]:
-        return [self.provider_status(p) for p in ("chatgpt", "claude", "gemini", "mistral")]
+        return [self.provider_status(p) for p in ("chatgpt", "claude", "gemini", "mistral", "grok")]
 
     def models(self, provider: str) -> list[dict[str, Any]]:
         provider = provider.lower().strip()
@@ -253,6 +293,8 @@ class ProviderManager:
                 {"provider":"mistral", "model":"mistral-large", "id":"account:mistral/mistral-large", "display":"Mistral Large"},
                 {"provider":"mistral", "model":"mistral-medium", "id":"account:mistral/mistral-medium", "display":"Mistral Medium"},
             ] if self._status_mistral().get("authenticated") else []
+        if provider == "grok":
+            return self._grok_models(timeout=20)
         if provider == "triforce":
             return self.triforce_models()
         raise ProviderError(f"Unknown provider: {provider}")
@@ -334,6 +376,26 @@ class ProviderManager:
                 if r.returncode != 0:
                     raise ProviderError((r.stderr or r.stdout).strip()[-1000:] or "Mistral Vibe request failed")
                 text = r.stdout.strip()
+        elif provider == "grok":
+            exe = self._candidate("grok")
+            if not exe: raise ProviderError("Grok Build CLI is not installed")
+            if not self._status_grok().get("authenticated"):
+                raise ProviderError("Grok login required")
+            with tempfile.TemporaryDirectory(prefix="gimp-mcp-grok-") as tmp:
+                r = self._run([
+                    exe, "--single", transcript, "--model", model,
+                    "--output-format", "plain", "--permission-mode", "plan",
+                    "--tools", "", "--disable-web-search", "--no-subagents",
+                    "--cwd", tmp,
+                ], timeout=request_timeout, cwd=tmp, env=self._clean_env())
+                if r.returncode != 0:
+                    diagnostic=((r.stdout or "")+"\n"+(r.stderr or "")).lower()
+                    if any(marker in diagnostic for marker in ("usage limit", "rate limit", "quota", "too many requests", " 429 ")):
+                        raise ProviderError("Grok account usage/rate limit reached; retry after the provider limit resets")
+                    if any(marker in diagnostic for marker in ("not authenticated", "not logged in", "login required", "unauthorized", " 401 ")):
+                        raise ProviderError("Grok authentication is no longer valid; reconnect the Grok account")
+                    raise ProviderError("Grok account client failed; verify the linked account")
+                text = r.stdout.strip()
         elif provider == "triforce":
             return self._triforce_chat(model, message, system_prompt, timeout=request_timeout)
         else:
@@ -349,6 +411,7 @@ class ProviderManager:
             "claude": [self._candidate("claude"), "auth", "login"],
             "gemini": [self._candidate("agy")],
             "mistral": [self._candidate("vibe"), "--setup"],
+            "grok": [self._candidate("grok"), "login", "--oauth"],
         }
         cmd = commands.get(provider)
         if not cmd or not cmd[0]:
@@ -370,6 +433,7 @@ class ProviderManager:
         commands = {
             "chatgpt": [self._candidate("codex"), "logout"],
             "claude": [self._candidate("claude"), "auth", "logout"],
+            "grok": [self._candidate("grok"), "logout"],
         }
         cmd = commands.get(provider)
         if not cmd or not cmd[0]:
@@ -413,7 +477,7 @@ class ProviderManager:
             raise ProviderError("TriForce token is not configured in GIMP MCP")
         data = json.dumps(payload).encode() if payload is not None else None
         req = urllib.request.Request(base + path, data=data, method=method, headers={
-            "Authorization": f"Bearer {token}", "Content-Type": "application/json", "User-Agent": "gimp-mcp/0.4",
+            "Authorization": f"Bearer {token}", "Content-Type": "application/json", "User-Agent": "gimp-mcp/0.5",
         })
         try:
             with urllib.request.urlopen(req, timeout=max(10, min(int(timeout if timeout is not None else self.timeout), 3600))) as resp:

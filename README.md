@@ -42,15 +42,22 @@ uv run mcp run src/gimp_mcp/server.py:mcp --transport streamable-http
 
 ## MCP Tools
 
-Session/Document: `gimp_status`, `session_create`, `session_open`, `session_info`, `session_undo`, `session_redo`, `session_close`, `document_save_as`.
+The public MCP surface is intentionally two-layered: a compact semantic tool set for reliable AI editing, plus expert PDB discovery/calls for installed GIMP features that do not need a dedicated wrapper.
 
-Layers/Editing: `layer_create`, `layer_delete`, `layer_update`, `layer_reorder`, `layer_fill`, `selection_set`, `text_create`, `transform_layer`.
+Semantic core:
+- Session/document: `session_create`, `session_open`, `session_info`, `session_undo`, `session_redo`, `session_close`, `document_save_as`, `document_resize`, `document_scale`, `document_crop`, `document_flatten`.
+- Layers/content: `layer_create`, `layer_duplicate`, `layer_delete`, `layer_update`, `layer_fill`, `layer_reorder`, `layer_resize`, `layer_resize_to_image`, `layer_add_alpha`, `layer_merge_down`, `layers_merge_visible`, `shape_create`, `text_create`, `import_layer`, `transform_layer`.
+- Selection/layout: `selection_set`, `guide_add`, `guide_list`, `guide_delete`.
+- Effects/output: `filter_list`, `filter_describe`, `filter_apply`, `preview_render`, `vision_capture`, `export_image`, `export_artwork`, `publish_artwork_downloads`.
+- Runtime/AI: provider, TriForce, live-bridge, headless-workspace and artwork-job lifecycle tools.
 
-Effects/Output: `filter_list`, `filter_describe`, `filter_apply`, `preview_render`, `export_image`.
+Expert coverage:
+- `pdb_search` discovers procedures from the GIMP installation itself.
+- `pdb_describe` returns the exact installed argument/return signature.
+- `pdb_call` provides typed JSON-safe invocation for primitives, the active image, layer/item/channel/path tattoo references, sandboxed `GFile`, GIMP/GEGL enums, `GeglColor`, and common named GIMP resources (brush/font/gradient/palette/pattern).
+- Specialized GI boxed-array types such as `GimpDoubleArray`, `GimpInt32Array` and `GimpCoreObjectArray` are not claimed as generic JSON-coercible; expose a semantic wrapper for workflows that require them. This avoids a false “complete” claim while preserving safe access to the practical PDB surface.
 
-Expert discovery: `pdb_search`, `pdb_describe`.
-
-Preview wird zusaetzlich als binaere MCP Resource `gimp-preview://{session_id}` angeboten.
+Preview is additionally exposed as binary MCP resources such as `gimp-preview://{session_id}`, with vision/timeline resources for agent feedback.
 
 ## Security
 
@@ -86,7 +93,7 @@ The Control Center provides:
 - **AI Control** — optional art-director provider/model selection through native official-client account integrations.
 - **Settings** — preview interval and size settings stored privately under `~/.local/state/gimp-mcp/control.json`.
 
-Provider credentials are deliberately **not copied into GIMP MCP**. ChatGPT/Codex, Claude Code, Mistral Vibe and Google Antigravity remain owners of their OAuth state. ChatGPT/Codex, Claude Code, Mistral Vibe and Google Antigravity are queried directly. AILinux/TriForce can be configured independently with GIMP_MCP_TRIFORCE_TOKEN.
+Provider credentials are deliberately **not copied into GIMP MCP**. ChatGPT/Codex, Claude Code, Mistral Vibe, Google Antigravity and Grok Build remain owners of their OAuth state. ChatGPT/Codex, Claude Code, Mistral Vibe and Google Antigravity are queried directly. AILinux/TriForce can be configured independently with GIMP_MCP_TRIFORCE_TOKEN.
 
 ### AI-client routing rule
 

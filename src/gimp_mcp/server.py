@@ -64,7 +64,7 @@ def _build_mcp() -> MCPServer:
             validate_token_resource=False,
         )
     return MCPServer(
-        "GIMP MCP", version="0.4.0",
+        "GIMP MCP", version="0.5.0",
         instructions="Structured GIMP 3 artwork editing. Prefer the connected live GIMP workspace; batch sessions are a fallback for tests and recovery. For visual reasoning call vision_capture periodically, then read gimp-vision://SESSION and optionally gimp-timeline://SESSION plus gimp-vision-meta://SESSION. Coordinates are GIMP canvas pixels with origin top-left, +x right, +y down.",
         **kwargs,
     )
@@ -202,6 +202,31 @@ def document_save_as(session_id: str, output_xcf: str, overwrite: bool = False) 
     except GimpMcpError as exc: return exc.as_dict()
 
 @mcp.tool()
+def document_resize(session_id: str, width: int, height: int, offset_x: int = 0, offset_y: int = 0) -> dict[str, Any]:
+    """Resize the canvas without scaling pixels. offset_x/y position the old image within the new canvas."""
+    return _call(ops.document_resize, sessions.get(session_id), width, height, offset_x, offset_y)
+
+@mcp.tool()
+def document_scale(session_id: str, width: int, height: int) -> dict[str, Any]:
+    """Scale the full image and all layers to width x height."""
+    return _call(ops.document_scale, sessions.get(session_id), width, height)
+
+@mcp.tool()
+def document_crop(session_id: str, width: int, height: int, x: int = 0, y: int = 0) -> dict[str, Any]:
+    """Crop the image to a bounded rectangle in canvas pixels."""
+    return _call(ops.document_crop, sessions.get(session_id), width, height, x, y)
+
+@mcp.tool()
+def document_autocrop(session_id: str, layer_id: int | None = None) -> dict[str, Any]:
+    """Autocrop the image to non-empty content, optionally using a specific layer as the reference drawable."""
+    return _call(ops.document_autocrop, sessions.get(session_id), layer_id)
+
+@mcp.tool()
+def document_flatten(session_id: str) -> dict[str, Any]:
+    """Flatten all visible image content to one layer. Snapshot-undoable."""
+    return _call(ops.document_flatten, sessions.get(session_id))
+
+@mcp.tool()
 def shape_create(session_id: str, name: str, shape: Literal['ellipse','rectangle'], x: float, y: float, width: float, height: float, color: str) -> dict[str, Any]:
     """Create a filled ellipse or rectangle on its own transparent full-canvas layer."""
     return _call(ops.shape_create, sessions.get(session_id), name, shape, x, y, width, height, color)
@@ -217,9 +242,39 @@ def layer_delete(session_id: str, layer_id: int) -> dict[str, Any]:
     return _call(ops.layer_delete, sessions.get(session_id), layer_id)
 
 @mcp.tool()
-def layer_update(session_id: str, layer_id: int, name: str | None = None, visible: bool | None = None, opacity: float | None = None) -> dict[str, Any]:
-    '''Rename a layer and/or set visibility/opacity. Opacity is percent 0..100.'''
-    return _call(ops.layer_set, sessions.get(session_id), layer_id, name=name, visible=visible, opacity=opacity)
+def layer_duplicate(session_id: str, layer_id: int, name: str | None = None) -> dict[str, Any]:
+    """Duplicate a layer and return a new persistent layer_id."""
+    return _call(ops.layer_duplicate, sessions.get(session_id), layer_id, name)
+
+@mcp.tool()
+def layer_resize(session_id: str, layer_id: int, width: int, height: int, offset_x: int = 0, offset_y: int = 0) -> dict[str, Any]:
+    """Resize a layer boundary without scaling its pixels."""
+    return _call(ops.layer_resize, sessions.get(session_id), layer_id, width, height, offset_x, offset_y)
+
+@mcp.tool()
+def layer_resize_to_image(session_id: str, layer_id: int) -> dict[str, Any]:
+    """Resize a layer boundary to the current image canvas."""
+    return _call(ops.layer_resize_to_image, sessions.get(session_id), layer_id)
+
+@mcp.tool()
+def layer_add_alpha(session_id: str, layer_id: int) -> dict[str, Any]:
+    """Ensure a layer has an alpha channel."""
+    return _call(ops.layer_add_alpha, sessions.get(session_id), layer_id)
+
+@mcp.tool()
+def layer_merge_down(session_id: str, layer_id: int, merge_type: Literal['expand','clip-image','clip-bottom'] = 'expand') -> dict[str, Any]:
+    """Merge one layer into the next layer below and return the resulting layer_id."""
+    return _call(ops.layer_merge_down, sessions.get(session_id), layer_id, merge_type)
+
+@mcp.tool()
+def layers_merge_visible(session_id: str, merge_type: Literal['expand','clip-image','clip-bottom'] = 'expand') -> dict[str, Any]:
+    """Merge all visible layers while preserving hidden layers."""
+    return _call(ops.layers_merge_visible, sessions.get(session_id), merge_type)
+
+@mcp.tool()
+def layer_update(session_id: str, layer_id: int, name: str | None = None, visible: bool | None = None, opacity: float | None = None, x: int | None = None, y: int | None = None, blend_mode: str | None = None, lock_alpha: bool | None = None) -> dict[str, Any]:
+    """Update layer name, visibility, opacity, absolute offsets, blend mode and/or alpha lock."""
+    return _call(ops.layer_set, sessions.get(session_id), layer_id, name=name, visible=visible, opacity=opacity, x=x, y=y, blend_mode=blend_mode, lock_alpha=lock_alpha)
 
 @mcp.tool()
 def layer_fill(session_id: str, layer_id: int, color: str = "black") -> dict[str, Any]:
@@ -232,14 +287,43 @@ def layer_reorder(session_id: str, layer_id: int, position: int) -> dict[str, An
     return _call(ops.layer_reorder, sessions.get(session_id), layer_id, position)
 
 @mcp.tool()
-def selection_set(session_id: str, action: Literal['none','all','invert','rectangle'], x: float = 0, y: float = 0, width: float = 0, height: float = 0) -> dict[str, Any]:
-    '''Set the current selection. rectangle uses pixel coordinates and dimensions; other actions ignore geometry.'''
-    return _call(ops.selection, sessions.get(session_id), action, x=x, y=y, width=width, height=height)
+def selection_set(session_id: str, action: Literal['none','all','invert','rectangle','ellipse','polygon','feather','grow','shrink','border','translate'], x: float = 0, y: float = 0, width: float = 0, height: float = 0, operation: Literal['replace','add','subtract','intersect'] = 'replace', radius: float = 0, steps: int = 0, dx: int = 0, dy: int = 0, points: list[float] | None = None) -> dict[str, Any]:
+    """Create/combine geometry selections or modify the current selection. Polygon points are a flat x/y list."""
+    return _call(ops.selection, sessions.get(session_id), action, x=x, y=y, width=width, height=height, operation=operation, radius=radius, steps=steps, dx=dx, dy=dy, points=points)
 
 @mcp.tool()
-def text_create(session_id: str, text: str, x: float, y: float, size: float = 64, font_name: str = 'Sans') -> dict[str, Any]:
-    '''Create an editable GIMP text layer at pixel position x/y. Size is pixels; returns the new layer_id.'''
-    return _call(ops.text_create, sessions.get(session_id), text, x, y, size, font_name)
+def guide_add(session_id: str, orientation: Literal['horizontal','vertical'], position: int) -> dict[str, Any]:
+    """Add a horizontal or vertical image guide."""
+    return _call(ops.guide_add, sessions.get(session_id), orientation, position)
+
+@mcp.tool()
+def guide_list(session_id: str) -> dict[str, Any]:
+    """List image guides and positions."""
+    return _call(ops.guide_list, sessions.get(session_id))
+
+@mcp.tool()
+def guide_delete(session_id: str, guide_id: int) -> dict[str, Any]:
+    """Delete one image guide by guide_id."""
+    return _call(ops.guide_delete, sessions.get(session_id), guide_id)
+
+@mcp.tool()
+def import_layer(session_id: str, path: str, name: str | None = None) -> dict[str, Any]:
+    """Import an allowed image file as a new layer in the current artwork session."""
+    try:
+        src=policy.resolve(path, must_exist=True)
+        return _call(ops.import_layer, sessions.get(session_id), src, name)
+    except GimpMcpError as exc:
+        return exc.as_dict()
+
+@mcp.tool()
+def text_create(session_id: str, text: str, x: float, y: float, size: float = 64, font_name: str = 'Sans', color: str | None = None) -> dict[str, Any]:
+    '''Create an editable GIMP text layer at pixel position x/y. Optional color accepts CSS/Gegl syntax.'''
+    return _call(ops.text_create, sessions.get(session_id), text, x, y, size, font_name, color)
+
+@mcp.tool()
+def text_update(session_id: str, layer_id: int, text: str | None = None, size: float | None = None, font_name: str | None = None, color: str | None = None) -> dict[str, Any]:
+    '''Update an existing editable GIMP text layer.'''
+    return _call(ops.text_update, sessions.get(session_id), layer_id, text=text, size=size, font_name=font_name, color=color)
 
 @mcp.tool()
 def transform_layer(session_id: str, layer_id: int, action: Literal['translate','rotate','scale'], values: Any) -> dict[str, Any]:
@@ -400,14 +484,30 @@ def _studio_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "session_create": session_create,
         "session_info": session_info,
+        "document_resize": document_resize,
+        "document_scale": document_scale,
+        "document_crop": document_crop,
+        "document_autocrop": document_autocrop,
+        "document_flatten": document_flatten,
         "layer_create": layer_create,
         "shape_create": shape_create,
         "layer_delete": layer_delete,
+        "layer_duplicate": layer_duplicate,
+        "layer_resize": layer_resize,
+        "layer_resize_to_image": layer_resize_to_image,
+        "layer_add_alpha": layer_add_alpha,
+        "layer_merge_down": layer_merge_down,
+        "layers_merge_visible": layers_merge_visible,
         "layer_update": layer_update,
         "layer_reorder": layer_reorder,
         "layer_fill": layer_fill,
         "selection_set": selection_set,
+        "guide_add": guide_add,
+        "guide_list": guide_list,
+        "guide_delete": guide_delete,
+        "import_layer": import_layer,
         "text_create": text_create,
+        "text_update": text_update,
         "transform_layer": transform_layer,
         "filter_apply": filter_apply,
         "filter_list": filter_list,

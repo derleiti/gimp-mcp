@@ -8,11 +8,14 @@ from typing import Any, Callable
 from .jobs import ArtworkJob, JobManager
 
 ALLOWED_TOOLS = {
-    "layer_create", "shape_create", "layer_delete", "layer_update", "layer_reorder",
-    "selection_set", "text_create", "transform_layer", "layer_fill", "filter_apply",
+    "document_resize", "document_scale", "document_crop", "document_autocrop", "document_flatten",
+    "layer_create", "shape_create", "layer_delete", "layer_duplicate", "layer_resize",
+    "layer_resize_to_image", "layer_add_alpha", "layer_merge_down", "layers_merge_visible",
+    "layer_update", "layer_reorder", "selection_set", "guide_add", "guide_list", "guide_delete",
+    "import_layer", "text_create", "text_update", "transform_layer", "layer_fill", "filter_apply",
     "filter_list", "filter_describe", "pdb_search", "pdb_describe", "pdb_call", "preview_render",
 }
-MUTATING_TOOLS = ALLOWED_TOOLS - {"preview_render", "filter_list", "filter_describe", "pdb_search", "pdb_describe"}
+MUTATING_TOOLS = ALLOWED_TOOLS - {"preview_render", "filter_list", "filter_describe", "pdb_search", "pdb_describe", "guide_list"}
 
 SYSTEM_PROMPT = """You are the art director for GIMP MCP Studio.
 Return ONLY one JSON object with keys goal, outcome, summary and steps. Each step must have tool,
@@ -23,11 +26,26 @@ For layer IDs created during this plan, use the exact string "$last_layer_id".
 For the initial/background layer use "$background_layer_id" when available.
 Never invent numeric layer IDs.
 Tool argument guide:
+- document_resize: width, height, optional offset_x, offset_y. Changes canvas only.
+- document_scale: width, height. Scales the full image.
+- document_crop: width, height, optional x, y.
+- document_autocrop: optional layer_id reference drawable.
+- document_flatten: no arguments.
 - layer_create: name, optional width, height, opacity (0..100), visible, blend_mode.
+- layer_duplicate: layer_id, optional name.
+- layer_resize: layer_id, width, height, optional offset_x, offset_y.
+- layer_resize_to_image: layer_id.
+- layer_add_alpha: layer_id.
+- layer_merge_down: layer_id, optional merge_type (expand/clip-image/clip-bottom).
+- layers_merge_visible: optional merge_type.
 - shape_create: name, shape (ellipse or rectangle), x, y, width, height, color. Prefer this for visible object parts such as heads, bodies, ears, eyes, badges and simple silhouettes.
 - layer_fill: layer_id, color.
-- layer_update: layer_id, optional name, visible, opacity.
-- text_create: text, x, y, optional size, font_name.
+- layer_update: layer_id, optional name, visible, opacity, x, y, blend_mode, lock_alpha.
+- selection_set supports none/all/invert/rectangle/ellipse/polygon/feather/grow/shrink/border/translate; polygon uses points=[x1,y1,x2,y2,...]. Geometry selections accept operation replace/add/subtract/intersect.
+- guide_add: orientation, position; guide_list has no args; guide_delete: guide_id.
+- import_layer: path, optional name. Paths remain restricted by the host PathPolicy.
+- text_create: text, x, y, optional size, font_name, color.
+- text_update: layer_id and any of text, size, font_name, color.
 - transform_layer: layer_id, action, values; prefer translate values=[dx,dy], rotate=[degrees], scale=[x0,y0,x1,y1]. Semantic objects are also accepted.
 - filter_apply: layer_id, operation, parameters, optional name.
   Gaussian blur accepts std-dev-x/std-dev-y; a single radius/size/sigma is also normalized safely by the host.
@@ -47,14 +65,30 @@ class PlanError(ValueError):
 
 
 _TOOL_ALLOWED_ARGS = {
+    "document_resize": {"width", "height", "offset_x", "offset_y"},
+    "document_scale": {"width", "height"},
+    "document_crop": {"width", "height", "x", "y"},
+    "document_autocrop": {"layer_id"},
+    "document_flatten": set(),
     "layer_create": {"name", "width", "height", "opacity", "visible", "blend_mode"},
     "shape_create": {"name", "shape", "x", "y", "width", "height", "color"},
     "layer_delete": {"layer_id"},
-    "layer_update": {"layer_id", "name", "visible", "opacity"},
+    "layer_duplicate": {"layer_id", "name"},
+    "layer_resize": {"layer_id", "width", "height", "offset_x", "offset_y"},
+    "layer_resize_to_image": {"layer_id"},
+    "layer_add_alpha": {"layer_id"},
+    "layer_merge_down": {"layer_id", "merge_type"},
+    "layers_merge_visible": {"merge_type"},
+    "layer_update": {"layer_id", "name", "visible", "opacity", "x", "y", "blend_mode", "lock_alpha"},
     "layer_reorder": {"layer_id", "position"},
     "layer_fill": {"layer_id", "color"},
-    "selection_set": {"action", "x", "y", "width", "height"},
-    "text_create": {"text", "x", "y", "size", "font_name"},
+    "selection_set": {"action", "x", "y", "width", "height", "operation", "radius", "steps", "dx", "dy", "points"},
+    "guide_add": {"orientation", "position"},
+    "guide_list": set(),
+    "guide_delete": {"guide_id"},
+    "import_layer": {"path", "name"},
+    "text_create": {"text", "x", "y", "size", "font_name", "color"},
+    "text_update": {"layer_id", "text", "size", "font_name", "color"},
     "transform_layer": {"layer_id", "action", "values"},
     "filter_apply": {"layer_id", "operation", "parameters", "name"},
     "filter_list": {"query", "limit"},
@@ -112,18 +146,41 @@ def _validate_step_arguments(index: int, tool: str, arguments: dict[str, Any]) -
             raise PlanError(f"step {index} uses unsupported filter operation: {operation or '<empty>'}")
         if not isinstance(arguments.get("parameters", {}), dict):
             raise PlanError(f"step {index} filter parameters must be an object")
-    if tool in {"layer_delete", "layer_update", "layer_reorder", "layer_fill", "transform_layer", "filter_apply"}:
+    if tool in {"layer_delete", "layer_duplicate", "layer_resize", "layer_resize_to_image", "layer_add_alpha", "layer_merge_down", "layer_update", "layer_reorder", "layer_fill", "text_update", "transform_layer", "filter_apply"}:
         if "layer_id" not in arguments:
             raise PlanError(f"step {index} {tool} requires layer_id")
+    if tool in {"document_resize", "document_scale", "document_crop"}:
+        if "width" not in arguments or "height" not in arguments:
+            raise PlanError(f"step {index} {tool} requires width and height")
+    if tool == "layer_resize" and ("width" not in arguments or "height" not in arguments):
+        raise PlanError(f"step {index} layer_resize requires width and height")
+    if tool == "guide_add" and (arguments.get("orientation") not in {"horizontal", "vertical"} or "position" not in arguments):
+        raise PlanError(f"step {index} guide_add requires horizontal/vertical orientation and position")
+    if tool == "guide_delete" and "guide_id" not in arguments:
+        raise PlanError(f"step {index} guide_delete requires guide_id")
+    if tool == "import_layer" and not str(arguments.get("path") or "").strip():
+        raise PlanError(f"step {index} import_layer requires path")
+    if tool == "selection_set":
+        action = str(arguments.get("action") or "")
+        if action not in {"none","all","invert","rectangle","ellipse","feather","grow","shrink","border","translate"}:
+            raise PlanError(f"step {index} selection_set has unsupported action: {action or '<empty>'}")
+        if action in {"rectangle","ellipse"}:
+            if not all(k in arguments for k in ("x","y","width","height")):
+                raise PlanError(f"step {index} {action} selection requires x, y, width, height")
+            if arguments.get("operation", "replace") not in {"replace","add","subtract","intersect"}:
+                raise PlanError(f"step {index} selection operation must be replace/add/subtract/intersect")
+    if tool == "text_update" and not any(k in arguments for k in ("text","size","font_name","color")):
+        raise PlanError(f"step {index} text_update requires at least one property to change")
     if tool == "transform_layer":
         action = str(arguments.get("action") or "")
         values = arguments.get("values")
-        if action not in {"translate", "rotate", "scale"} or not isinstance(values, list):
+        if action not in {"translate", "rotate", "scale"} or not isinstance(values, (list, dict)):
             raise PlanError(f"step {index} has invalid transform arguments")
-        expected = {"translate": {2}, "rotate": {1, 3}, "scale": {4}}[action]
-        if len(values) not in expected or any(not isinstance(v, (int, float)) or isinstance(v, bool) for v in values):
-            signatures = "translate=[dx,dy], rotate=[degrees] or [degrees,cx,cy], scale=[x0,y0,x1,y1]"
-            raise PlanError(f"step {index} transform_layer invalid values for {action}; expected {signatures}")
+        if isinstance(values, list):
+            expected = {"translate": {2}, "rotate": {1, 3}, "scale": {4}}[action]
+            if len(values) not in expected or any(not isinstance(v, (int, float)) or isinstance(v, bool) for v in values):
+                signatures = "translate=[dx,dy], rotate=[degrees] or [degrees,cx,cy], scale=[x0,y0,x1,y1]"
+                raise PlanError(f"step {index} transform_layer invalid values for {action}; expected {signatures}")
 
 
 def parse_plan(raw: str, *, max_steps: int = 50) -> dict[str, Any]:

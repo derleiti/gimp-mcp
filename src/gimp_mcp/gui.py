@@ -35,6 +35,20 @@ CONTROL = ControlSettings(STATE / "control.json")
 
 GUI_LOG = STATE / "gui.log"
 
+def _studio_mcp_endpoint(saved: dict) -> str:
+    """Resolve the endpoint the local Studio client must actually reach.
+
+    Bind-all addresses are server-side concepts and are never valid client
+    destinations, so they intentionally collapse to loopback.
+    """
+    port = int(saved.get("mcp_port", 8000))
+    host = str(saved.get("mcp_bind_host", "127.0.0.1") or "127.0.0.1").strip()
+    if host in {"0.0.0.0", "::", "[::]", "*"}:
+        host = "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}/mcp"
+
 def _configure_gui_logging() -> logging.Logger:
     logger=logging.getLogger("gimp_mcp.gui")
     if not logger.handlers:
@@ -60,6 +74,10 @@ class ControlCenter(QMainWindow):
         self.resize(1180, 760)
         STATE.mkdir(parents=True, exist_ok=True)
         GUI_LOGGER.info("Control Center starting pid=%s root=%s sessions=%s", os.getpid(), ROOT, SESSIONS)
+        # Apply persisted transport/auth settings before Studio constructs jobs.
+        # Otherwise a network-bound service is running correctly while Studio
+        # silently falls back to the historical 127.0.0.1 endpoint.
+        self._apply_runtime_settings(CONTROL.load())
         tabs = QTabWidget(); self.tabs=tabs; self.setCentralWidget(tabs)
         tabs.addTab(self._studio_tab(), "Studio")
         tabs.addTab(self._live_tab(), "Live")
@@ -89,8 +107,7 @@ class ControlCenter(QMainWindow):
             os.environ["GIMP_MCP_GIMP"] = str(saved["managed_gimp_path"])
         else:
             os.environ.pop("GIMP_MCP_GIMP", None)
-        port=int(saved.get("mcp_port",8000))
-        os.environ["GIMP_MCP_ENDPOINT"] = f"http://127.0.0.1:{port}/mcp"
+        os.environ["GIMP_MCP_ENDPOINT"] = _studio_mcp_endpoint(saved)
         if saved.get("mcp_network_enabled") and saved.get("mcp_auth_token"):
             os.environ["GIMP_MCP_AUTH_TOKEN"] = str(saved["mcp_auth_token"])
         else:
@@ -125,7 +142,7 @@ class ControlCenter(QMainWindow):
     def _studio_tab(self):
         w=QWidget(); v=QVBoxLayout(w)
         top=QHBoxLayout()
-        self.studio_provider=QComboBox(); self.studio_provider.addItems(["chatgpt","claude","gemini","mistral","triforce"])
+        self.studio_provider=QComboBox(); self.studio_provider.addItems(["grok","chatgpt","claude","gemini","mistral","triforce"])
         self.studio_model=QComboBox(); self.studio_model.setEditable(True); self.studio_model.setMinimumWidth(420); self.studio_model.setPlaceholderText("model id")
         self.studio_provider.currentTextChanged.connect(self.studio_refresh_models)
         self.studio_mode=QComboBox(); self.studio_mode.addItems(["auto","live","batch"])
@@ -365,13 +382,14 @@ class ControlCenter(QMainWindow):
     def _ai_tab(self):
         w=QWidget(); v=QVBoxLayout(w)
         v.addWidget(QLabel("Choose an optional AI art director. Provider credentials stay with the official provider clients; GIMP MCP does not depend on AICoder."))
-        self.provider=QComboBox(); self.provider.addItems(["triforce","chatgpt","claude","gemini","mistral"])
+        self.provider=QComboBox(); self.provider.addItems(["grok","triforce","chatgpt","claude","gemini","mistral"])
         self.model=QComboBox(); self.model.setMinimumWidth(420)
         saved=CONTROL.load(); idx=self.provider.findText(saved.get("ai_provider","triforce")); self.provider.setCurrentIndex(max(0,idx))
         row=QHBoxLayout(); row.addWidget(QLabel("Provider")); row.addWidget(self.provider); row.addWidget(QLabel("Model")); row.addWidget(self.model)
-        status=QPushButton("Refresh models/status"); connect=QPushButton("Connect / Login"); save=QPushButton("Use selected model")
-        status.clicked.connect(self.provider_status); connect.clicked.connect(self.provider_connect); save.clicked.connect(self.save_ai_selection)
-        row.addWidget(status); row.addWidget(connect); row.addWidget(save); row.addStretch(); v.addLayout(row)
+        status=QPushButton("Refresh models/status"); connect=QPushButton("Connect / Login"); disconnect=QPushButton("Disconnect / Logout"); save=QPushButton("Use selected model")
+        status.clicked.connect(self.provider_status); connect.clicked.connect(self.provider_connect); disconnect.clicked.connect(self.provider_disconnect); save.clicked.connect(self.save_ai_selection)
+        self.provider.currentTextChanged.connect(lambda _text: self.provider_status())
+        row.addWidget(status); row.addWidget(connect); row.addWidget(disconnect); row.addWidget(save); row.addStretch(); v.addLayout(row)
         self.provider_output=QTextEdit(); self.provider_output.setReadOnly(True); v.addWidget(self.provider_output,1)
         QTimer.singleShot(100, self.provider_status)
         return w
@@ -646,12 +664,34 @@ class ControlCenter(QMainWindow):
     def provider_connect(self):
         provider=self.provider.currentText()
         if provider == "triforce":
-            self.provider_output.setPlainText("TriForce is independent too. Configure GIMP_MCP_TRIFORCE_TOKEN, then refresh here."); return
+            self.provider_output.setPlainText("TriForce uses the configured AILinux account/token path; refresh here after login/configuration."); return
         if not PROJECT_PYTHON.exists():
             self.provider_output.setPlainText("Project environment missing; run Sync project first.")
             return
-        subprocess.Popen([str(PROJECT_PYTHON),"-m","gimp_mcp.provider_cli","connect",provider],cwd=str(ROOT),start_new_session=True)
-        self.provider_output.setPlainText(f"Started native {provider} login flow in the official client. Complete it, then refresh models/status.")
+        proc=QProcess(self); proc.setWorkingDirectory(str(ROOT)); proc.setProgram(str(PROJECT_PYTHON)); proc.setProperty("provider",provider); proc.setProperty("action","connect")
+        proc.setArguments(["-m","gimp_mcp.provider_cli","connect",provider])
+        proc.finished.connect(lambda _code,_status,p=proc:self._provider_action_finished(p))
+        self._provider_action_process=proc; self.provider_output.setPlainText(f"Starting native {provider} login flow…"); proc.start()
+
+    def provider_disconnect(self):
+        provider=self.provider.currentText()
+        if provider == "triforce":
+            self.provider_output.setPlainText("TriForce logout is managed by the AILinux account/session, not by this provider panel."); return
+        if not PROJECT_PYTHON.exists():
+            self.provider_output.setPlainText("Project environment missing; run Sync project first."); return
+        proc=QProcess(self); proc.setWorkingDirectory(str(ROOT)); proc.setProgram(str(PROJECT_PYTHON)); proc.setProperty("provider",provider); proc.setProperty("action","disconnect")
+        proc.setArguments(["-m","gimp_mcp.provider_cli","disconnect",provider])
+        proc.finished.connect(lambda _code,_status,p=proc:self._provider_action_finished(p))
+        self._provider_action_process=proc; self.provider_output.setPlainText(f"Disconnecting {provider}…"); proc.start()
+
+    def _provider_action_finished(self, proc):
+        provider=str(proc.property("provider") or ""); action=str(proc.property("action") or "")
+        stdout=bytes(proc.readAllStandardOutput()).decode("utf-8","replace"); stderr=bytes(proc.readAllStandardError()).decode("utf-8","replace")
+        if proc.exitCode()!=0:
+            self.provider_output.setPlainText((stderr or stdout or f"{action} failed").strip())
+        else:
+            self.provider_output.setPlainText((stdout or f"{provider} {action} completed").strip())
+        proc.deleteLater(); QTimer.singleShot(500,self.provider_status)
 
     def _session_changed(self, sid):
         sid=str(sid or "").strip()

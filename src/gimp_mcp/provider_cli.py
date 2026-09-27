@@ -9,9 +9,9 @@ from .provider_manager import ProviderManager
 def main() -> int:
     parser = argparse.ArgumentParser(prog="gimp-mcp-provider")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("status", "models", "connect"):
+    for name in ("status", "models", "connect", "disconnect"):
         p = sub.add_parser(name)
-        p.add_argument("provider", choices=("chatgpt", "claude", "gemini", "mistral", "triforce"))
+        p.add_argument("provider", choices=("chatgpt", "claude", "gemini", "mistral", "grok", "triforce"))
     args = parser.parse_args()
     manager = ProviderManager()
     if args.command == "status":
@@ -20,8 +20,10 @@ def main() -> int:
         payload = {"status": status, "models": models}
     elif args.command == "models":
         payload = manager.models(args.provider)
-    else:
+    elif args.command == "connect":
         payload = manager.connect(args.provider, open_browser=True)
+    else:
+        payload = manager.disconnect(args.provider)
     print(json.dumps(payload, ensure_ascii=False, default=str))
     return 0
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 - 2026-09-27
+
+### Complete semantic editing core
+- Added canvas resize, full-image scale, crop, autocrop and flatten operations.
+- Added layer duplicate, boundary resize, resize-to-canvas, alpha, merge-down and merge-visible operations.
+- Expanded layer updates with absolute position, blend mode and alpha-lock controls.
+- Expanded selections with ellipse plus replace/add/subtract/intersect and feather/grow/shrink/border/translate operations.
+- Added image guides, safe image-as-layer import, text color and editable text updates.
+- Kept the semantic MCP surface compact while retaining `pdb_search`, `pdb_describe` and typed `pdb_call` as the expert fallback for the broader installed GIMP PDB.
+
+### Runtime and transport health
+- Fixed Studio using a hard-coded `127.0.0.1` MCP URL when the service is bound to a WireGuard/LAN address. Persisted bind/auth settings are now applied before Studio starts jobs.
+- Added bind-all endpoint normalization so `0.0.0.0`/`::` resolve to loopback for local Studio clients.
+- Repaired the development editable environment so workspace tests import `/home/zombie/workspace/gimp-mcp` rather than the deployed `/home/zombie/gimp-mcp` checkout.
+- Synchronized package, MCP server and provider client version metadata.
+
+### Verification
+- Added real GIMP 3.2.2 integration coverage for the extended command set and typed enum PDB calls.
+- Added endpoint regression tests for WireGuard, bind-all and IPv6 configurations.
+
 ## 0.4.1 - 2026-09-11
 
 - Consolidate the current iterative Studio orchestration, live-preview, validation and recovery work for the stack release.
