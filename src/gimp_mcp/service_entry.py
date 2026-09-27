@@ -11,6 +11,10 @@ def main() -> None:
     saved = ControlSettings(state/"control.json").load()
     host = str(saved.get("mcp_bind_host", "127.0.0.1"))
     port = int(saved.get("mcp_port", 8000))
+    client_host = "127.0.0.1" if host in {"0.0.0.0", "::", "[::]", "*"} else host
+    if ":" in client_host and not client_host.startswith("["):
+        client_host = f"[{client_host}]"
+    os.environ["GIMP_MCP_ENDPOINT"] = f"http://{client_host}:{port}/mcp"
     if saved.get("mcp_network_enabled"):
         token = str(saved.get("mcp_auth_token") or "").strip()
         if not token:

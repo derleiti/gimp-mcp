@@ -549,7 +549,16 @@ def _prompt_runner() -> PromptRunner:
     return PromptRunner(jobs, providers.chat, _studio_tool_call, **_runner_options())
 
 def _mcp_prompt_runner(endpoint: str | None = None) -> PromptRunner:
-    endpoint = endpoint or os.getenv("GIMP_MCP_ENDPOINT", "http://127.0.0.1:8000/mcp")
+    if not endpoint:
+        endpoint = os.getenv("GIMP_MCP_ENDPOINT", "").strip()
+    if not endpoint:
+        saved = ControlSettings(settings.state_dir / "control.json").load()
+        host = str(saved.get("mcp_bind_host", "127.0.0.1") or "127.0.0.1").strip()
+        if host in {"0.0.0.0", "::", "[::]", "*"}:
+            host = "127.0.0.1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        endpoint = f"http://{host}:{int(saved.get('mcp_port', 8000))}/mcp"
     opts=_runner_options()
     client = StudioMcpClient(endpoint, timeout=float(opts["gimp_operation_timeout"]), bearer_token=os.getenv("GIMP_MCP_AUTH_TOKEN", ""))
     return PromptRunner(jobs, providers.chat, client.call_tool, **opts)
