@@ -22,7 +22,7 @@ from gimp_mcp.first_run import SetupWizard
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSpinBox, QTabWidget,
-    QTextEdit, QVBoxLayout, QWidget
+    QPlainTextEdit, QTextEdit, QVBoxLayout, QWidget
 )
 
 STATE = Path(os.getenv("GIMP_MCP_STATE_DIR", str(Path.home() / ".local/state/gimp-mcp")))
@@ -85,6 +85,7 @@ class ControlCenter(QMainWindow):
         tabs.addTab(self._ai_tab(), "AI Control")
         tabs.addTab(self._setup_tab(), "Setup / Updates")
         tabs.addTab(self._settings_tab(), "Settings")
+        tabs.addTab(self._diagnostics_tab(), "Diagnostics")
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(750)
         self.refresh()
         QTimer.singleShot(350, self._maybe_first_run)
@@ -445,6 +446,30 @@ class ControlCenter(QMainWindow):
         try: self.setup_output.setPlainText(json.dumps(self._setup_manager().self_test(),indent=2,default=str))
         except Exception as exc: self.setup_output.setPlainText(str(exc))
         finally: QApplication.restoreOverrideCursor()
+
+    def _diagnostics_tab(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from gimp_mcp.bug_reporter import submit_manual
+        root=QWidget(); layout=QVBoxLayout(root)
+        privacy=QLabel("Redacted GIMP MCP diagnostics are sent to bugs@ailinux.me. Artwork, exported images, workspace files, prompts, tokens and passwords are not attached.")
+        privacy.setWordWrap(True); layout.addWidget(privacy)
+        message=QPlainTextEdit(); message.setPlaceholderText("What happened? What were you doing just before it happened? (optional)"); layout.addWidget(message)
+        submit=QPushButton("Submit diagnostics"); status=QLabel(""); layout.addWidget(submit); layout.addWidget(status)
+        pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix="gimp-mcp-bug-report"); timer=QTimer(root); timer.setInterval(120); future={"value":None}
+        def do_submit():
+            submit.setEnabled(False); status.setText("Submitting…"); future["value"]=pool.submit(submit_manual,message.toPlainText()); timer.start()
+        def poll():
+            job=future.get("value")
+            if job is None or not job.done(): return
+            timer.stop(); submit.setEnabled(True)
+            try:
+                result=job.result()
+                if result.get("ok"): status.setText("Report submitted."); message.clear()
+                elif result.get("queued"): status.setText("Offline/server unavailable — report queued for retry.")
+                else: status.setText("Report could not be submitted.")
+            except Exception as exc: status.setText(f"Report error: {exc}")
+        submit.clicked.connect(do_submit); timer.timeout.connect(poll); root.destroyed.connect(lambda:pool.shutdown(wait=False,cancel_futures=True))
+        return root
 
     def _settings_tab(self):
         w=QWidget(); form=QFormLayout(w); saved=CONTROL.load()
@@ -848,9 +873,13 @@ class ControlCenter(QMainWindow):
 
 
 def main():
+    from gimp_mcp import __version__
+    from gimp_mcp.bug_reporter import install as install_bug_reporter
+    install_bug_reporter(app="GIMP MCP Studio", repo="gimp-mcp", version=__version__, channel="desktop")
+    reporter_hook=sys.excepthook
     def _excepthook(exc_type, exc, tb):
         GUI_LOGGER.critical("Uncaught exception", exc_info=(exc_type, exc, tb))
-        sys.__excepthook__(exc_type, exc, tb)
+        reporter_hook(exc_type, exc, tb)
     sys.excepthook=_excepthook
     app=QApplication(sys.argv); win=ControlCenter(); win.show(); return app.exec()
 

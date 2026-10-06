@@ -7,6 +7,9 @@ from .control_settings import ControlSettings
 
 
 def main() -> None:
+    from . import __version__
+    from .bug_reporter import install as install_bug_reporter
+    install_bug_reporter(app="GIMP MCP Service", repo="gimp-mcp", version=__version__, channel="service")
     state = Path(os.getenv("GIMP_MCP_STATE_DIR", str(Path.home()/".local/state/gimp-mcp")))
     saved = ControlSettings(state/"control.json").load()
     host = str(saved.get("mcp_bind_host", "127.0.0.1"))

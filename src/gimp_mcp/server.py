@@ -649,6 +649,9 @@ def artwork_make_it_cooler(job_id: str, preset: str = "Make it cooler") -> dict[
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    from . import __version__
+    from .bug_reporter import install as install_bug_reporter
+    install_bug_reporter(app="GIMP MCP Server", repo="gimp-mcp", version=__version__, channel="service")
     mcp.run()
 
 if __name__ == '__main__': main()
